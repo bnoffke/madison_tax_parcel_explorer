@@ -382,7 +382,7 @@ if selected_value and selected_value is not None:
                     f"{format_number(parcel_data.get('lot_size'))} sq ft"
                 ]
             })
-            st.dataframe(assessment_data, hide_index=True, use_container_width=True)
+            st.dataframe(assessment_data, hide_index=True, width='stretch')
 
             st.markdown("#### Tax Information")
             tax_data = pd.DataFrame({
@@ -397,7 +397,7 @@ if selected_value and selected_value is not None:
                     f"${format_number(parcel_data.get('net_taxes_per_sqft_lot'), decimals=2)}",
                 ]
             })
-            st.dataframe(tax_data, hide_index=True, use_container_width=True)
+            st.dataframe(tax_data, hide_index=True, width='stretch')
 
             st.markdown("#### Land Value Tax Analysis")
             tax_impact = format_tax_change(
@@ -416,7 +416,7 @@ if selected_value and selected_value is not None:
                     tax_impact
                 ]
             })
-            st.dataframe(lvt_data, hide_index=True, use_container_width=True)
+            st.dataframe(lvt_data, hide_index=True, width='stretch')
 
         with right_col:
             # Load historical tax roll data
@@ -439,7 +439,7 @@ if selected_value and selected_value is not None:
                             'Effective Tax Rate',
                             is_currency=False
                         )
-                        st.altair_chart(tax_rate_chart, use_container_width=True)
+                        st.altair_chart(tax_rate_chart, width='stretch')
                     else:
                         st.info("Tax rate data unavailable")
 
@@ -452,7 +452,7 @@ if selected_value and selected_value is not None:
                         'Net Taxes',
                         is_currency=True
                     )
-                    st.altair_chart(net_tax_chart, use_container_width=True)
+                    st.altair_chart(net_tax_chart, width='stretch')
 
                 with chart3_col:
                     # Chart 3: Total Assessed Value
@@ -463,7 +463,7 @@ if selected_value and selected_value is not None:
                         'Assessed Value',
                         is_currency=True
                     )
-                    st.altair_chart(assessed_value_chart, use_container_width=True)
+                    st.altair_chart(assessed_value_chart, width='stretch')
 
                 # Bottom: Grouped bar chart for tax sources (full width)
                 st.markdown("#### Tax Breakdown by Source")
@@ -475,7 +475,7 @@ if selected_value and selected_value is not None:
                     label_visibility="collapsed"
                 )
                 tax_sources_chart = create_tax_sources_chart(tax_history_df, group_by=group_by)
-                st.altair_chart(tax_sources_chart, use_container_width=True)
+                st.altair_chart(tax_sources_chart, width='stretch')
 
             elif not tax_history_df.empty and len(tax_history_df) < 2:
                 st.info("At least 2 years of data required to show trends")
