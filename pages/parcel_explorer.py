@@ -7,7 +7,6 @@ from utils.formatters import (
     format_currency,
     format_percentage,
     format_number,
-    format_tax_change,
     format_address,
 )
 
@@ -58,7 +57,7 @@ def search_addresses(searchterm: str) -> list[tuple[str, str]]:
             )
         ) AS full_address,
         parcel_id
-    FROM 'gs://{SILVER_BUCKET}/fact_parcels.parquet'
+    FROM read_parquet('{SILVER_BUCKET}/fact_parcels.parquet')
     WHERE CONCAT(
         CAST(house_nbr AS VARCHAR),
         CASE WHEN street_dir IS NOT NULL AND street_dir != '' THEN ' ' || street_dir ELSE '' END,
@@ -97,7 +96,7 @@ def load_parcel_data(parcel_id: str) -> dict:
 
     query = f"""
     SELECT *
-    FROM 'gs://{SILVER_BUCKET}/fact_parcels.parquet'
+    FROM read_parquet('{SILVER_BUCKET}/fact_parcels.parquet')
     WHERE parcel_id = '{parcel_id.replace("'", "''")}'
     """
 
@@ -128,12 +127,14 @@ def load_tax_roll_history(parcel_id: str) -> pd.DataFrame:
     SELECT
         tax_year,
         total_assessed_value,
+        assessed_value_land,
+        assessed_value_improvement,
         net_tax,
         city_tax,
         county_tax,
         school_tax,
         matc_tax
-    FROM 'gs://{SILVER_BUCKET}/fact_tax_roll.parquet'
+    FROM read_parquet('{SILVER_BUCKET}/fact_tax_roll.parquet')
     WHERE parcel_id = '{parcel_id.replace("'", "''")}'
     ORDER BY tax_year
     """
@@ -204,6 +205,69 @@ def create_trend_chart(
     ).configure_title(
         fontSize=14,
         anchor='start'
+    )
+
+    return chart
+
+
+def create_assessed_value_trend_chart(df: pd.DataFrame) -> alt.Chart:
+    """
+    Create a multi-line chart showing total, land, and improvement assessed values over time.
+
+    Args:
+        df: DataFrame with tax_year, total_assessed_value, assessed_value_land, assessed_value_improvement
+
+    Returns:
+        Altair Chart object with three trend lines
+    """
+    # Melt the dataframe to long format for multi-line chart
+    value_columns = ['total_assessed_value', 'assessed_value_land', 'assessed_value_improvement']
+    df_melted = df.melt(
+        id_vars=['tax_year'],
+        value_vars=value_columns,
+        var_name='value_type',
+        value_name='amount'
+    )
+
+    # Clean up value type names for display
+    type_labels = {
+        'total_assessed_value': 'Total',
+        'assessed_value_land': 'Land',
+        'assessed_value_improvement': 'Improvement'
+    }
+    df_melted['value_type'] = df_melted['value_type'].map(type_labels)
+
+    # Color scale for value types
+    color_scale = alt.Scale(
+        domain=['Total', 'Land', 'Improvement'],
+        range=['#1f77b4', '#2ca02c', '#ff7f0e']
+    )
+
+    chart = alt.Chart(df_melted).mark_line(point=True).encode(
+        x=alt.X('tax_year:O', title='Year', axis=alt.Axis(labelAngle=0)),
+        y=alt.Y('amount:Q', title='Value ($)', axis=alt.Axis(format='$,.0f')),
+        color=alt.Color('value_type:N', title=None, scale=color_scale),
+        tooltip=[
+            alt.Tooltip('tax_year:O', title='Year'),
+            alt.Tooltip('value_type:N', title='Type'),
+            alt.Tooltip('amount:Q', title='Value', format='$,.0f')
+        ]
+    ).properties(
+        title='Assessed Value',
+        width='container',
+        height=250
+    ).configure_axis(
+        labelFontSize=11,
+        titleFontSize=12
+    ).configure_title(
+        fontSize=14,
+        anchor='start'
+    ).configure_legend(
+        orient='none',
+        legendX=130,
+        legendY=-50,
+        direction='horizontal',
+        labelFontSize=10
     )
 
     return chart
@@ -365,58 +429,41 @@ if selected_value and selected_value is not None:
         left_col, right_col = st.columns([0.2, 0.8])
 
         with left_col:
-            st.markdown("#### Assessment Values")
+            st.markdown("#### Assessments")
             assessment_data = pd.DataFrame({
                 "Metric": [
                     "Land Value",
                     "Improvement Value",
-                    "Total Value",
-                    "Land Share of Property",
+                    "Total Assessed Value",
+                    "Net Taxes",
                     "Lot Size"
                 ],
                 "Value": [
                     format_currency(parcel_data.get('current_land_value')),
                     format_currency(parcel_data.get('current_improvement_value')),
                     format_currency(parcel_data.get('current_total_value')),
-                    format_percentage(parcel_data.get('land_share_property', 0) * 100 if parcel_data.get('land_share_property') else None),
+                    format_currency(parcel_data.get('net_taxes')),
                     f"{format_number(parcel_data.get('lot_size'))} sq ft"
                 ]
             })
-            st.dataframe(assessment_data, hide_index=True, width='stretch')
+            st.dataframe(assessment_data, hide_index=True, use_container_width=True)
 
-            st.markdown("#### Tax Information")
-            tax_data = pd.DataFrame({
+            st.markdown("#### Land Efficiency")
+            efficiency_data = pd.DataFrame({
                 "Metric": [
-                    "Net Taxes",
-                    "Tax Rate",
-                    "Net Taxes/sqft",
+                    "Land Value per sqft",
+                    "Net Taxes per sqft",
+                    "Land Share of Property",
+                    "Land Value Alignment Index"
                 ],
                 "Value": [
-                    format_currency(parcel_data.get('net_taxes')),
-                    format_number(parcel_data.get('tax_rate'), decimals=2),
+                    f"${format_number(parcel_data.get('land_value_per_sqft_lot'), decimals=2)}",
                     f"${format_number(parcel_data.get('net_taxes_per_sqft_lot'), decimals=2)}",
+                    format_percentage(parcel_data.get('land_share_property', 0) * 100 if parcel_data.get('land_share_property') else None),
+                    format_number(parcel_data.get('land_value_alignment_index'), decimals=2)
                 ]
             })
-            st.dataframe(tax_data, hide_index=True, width='stretch')
-
-            st.markdown("#### Land Value Tax Analysis")
-            tax_impact = format_tax_change(
-                parcel_data.get('net_taxes'),
-                parcel_data.get('land_value_shift_taxes')
-            )
-            lvt_data = pd.DataFrame({
-                "Metric": [
-                    "Current Net Taxes",
-                    "Land Value Shift Taxes",
-                    "Tax Impact"
-                ],
-                "Value": [
-                    format_currency(parcel_data.get('net_taxes')),
-                    format_currency(parcel_data.get('land_value_shift_taxes')),
-                    tax_impact
-                ]
-            })
-            st.dataframe(lvt_data, hide_index=True, width='stretch')
+            st.dataframe(efficiency_data, hide_index=True, use_container_width=True)
 
         with right_col:
             # Load historical tax roll data
@@ -455,15 +502,9 @@ if selected_value and selected_value is not None:
                     st.altair_chart(net_tax_chart, width='stretch')
 
                 with chart3_col:
-                    # Chart 3: Total Assessed Value
-                    assessed_value_chart = create_trend_chart(
-                        tax_history_df,
-                        'total_assessed_value',
-                        'Value ($)',
-                        'Assessed Value',
-                        is_currency=True
-                    )
-                    st.altair_chart(assessed_value_chart, width='stretch')
+                    # Chart 3: Assessed Values (Total, Land, Improvement)
+                    assessed_value_chart = create_assessed_value_trend_chart(tax_history_df)
+                    st.altair_chart(assessed_value_chart, use_container_width=True)
 
                 # Bottom: Grouped bar chart for tax sources (full width)
                 st.markdown("#### Tax Breakdown by Source")
