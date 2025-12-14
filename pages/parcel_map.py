@@ -4,11 +4,11 @@ import pydeck as pdk
 import json
 import numpy as np
 
+from utils.db import get_connection
 from utils.formatters import format_currency, format_number
 
-# Access shared state
-conn = st.session_state.conn
-GOLD_BUCKET = st.session_state.GOLD_BUCKET
+# Access shared state (initializes if needed)
+conn, _, GOLD_BUCKET = get_connection()
 
 # Metric configuration
 METRICS = {
@@ -16,6 +16,34 @@ METRICS = {
     "Land Value per Sq Ft": "land_value_per_sqft_lot",
     "Land Value Alignment Index": "land_value_alignment_index",
 }
+
+# Magma colormap stops (normalized position, RGB) - reversed
+# Perceptually uniform gradient: light -> orange -> magenta -> purple -> dark
+MAGMA_STOPS = [
+    (0.0, [252, 253, 191]),
+    (0.25, [252, 143, 89]),
+    (0.5, [183, 55, 121]),
+    (0.75, [82, 22, 108]),
+    (1.0, [0, 0, 4]),
+]
+
+
+def interpolate_magma_color(norm_val: float) -> list[int]:
+    """Interpolate RGB color from magma colormap based on normalized value (0-1)."""
+    # Find the two stops to interpolate between
+    for i in range(len(MAGMA_STOPS) - 1):
+        pos1, color1 = MAGMA_STOPS[i]
+        pos2, color2 = MAGMA_STOPS[i + 1]
+        if pos1 <= norm_val <= pos2:
+            # Linear interpolation between stops
+            t = (norm_val - pos1) / (pos2 - pos1)
+            return [
+                int(color1[0] + t * (color2[0] - color1[0])),
+                int(color1[1] + t * (color2[1] - color1[1])),
+                int(color1[2] + t * (color2[2] - color1[2])),
+            ]
+    # Fallback to last color
+    return list(MAGMA_STOPS[-1][1])
 
 
 @st.cache_data(ttl=600)
@@ -75,11 +103,9 @@ def calculate_colors(values: np.ndarray) -> tuple[list, float, float]:
         else:
             # Normalize to 0-1, clipping outliers
             norm_val = np.clip((val - p2) / (p98 - p2), 0, 1)
-            # Yellow [255, 255, 0] (low) -> Purple [128, 0, 128] (high)
-            r = int(255 - (255 - 128) * norm_val)
-            g = int(255 - 255 * norm_val)
-            b = int(0 + 128 * norm_val)
-            colors.append([r, g, b, 180])
+            # Magma colormap: dark -> purple -> magenta -> orange -> light
+            rgb = interpolate_magma_color(norm_val)
+            colors.append([rgb[0], rgb[1], rgb[2], 180])
 
     return colors, p2, p98
 
@@ -140,7 +166,7 @@ with st.sidebar:
     st.markdown("### Legend")
     st.markdown(f"**{selected_metric_label}**")
     st.markdown("""
-    <div style="background: linear-gradient(to right, #FFFF00, #800080); height: 20px; width: 100%; border-radius: 4px;"></div>
+    <div style="background: linear-gradient(to right, #FCFDBF, #FC8F59, #B73779, #521C6C, #000004); height: 20px; width: 100%; border-radius: 4px;"></div>
     <div style="display: flex; justify-content: space-between; font-size: 12px;">
         <span>Low</span><span>High</span>
     </div>

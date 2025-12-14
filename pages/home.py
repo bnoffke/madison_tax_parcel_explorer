@@ -1,5 +1,7 @@
 import streamlit as st
 
+
+
 st.title("Madison Tax Parcel Explorer")
 
 st.markdown("""
@@ -21,7 +23,7 @@ with col1:
 
 with col2:
     st.markdown("""
-    **Parcel Map** *(Coming Soon)*
+    **Parcel Map**
 
     Visualize property metrics across the city with an interactive map
     and customizable metric overlays.

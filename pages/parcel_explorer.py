@@ -3,6 +3,7 @@ import pandas as pd
 import altair as alt
 from streamlit_searchbox import st_searchbox
 
+from utils.db import get_connection
 from utils.formatters import (
     format_currency,
     format_percentage,
@@ -10,10 +11,10 @@ from utils.formatters import (
     format_address,
 )
 
-# Access shared state
-conn = st.session_state.conn
-SILVER_BUCKET = st.session_state.SILVER_BUCKET
-GOLD_BUCKET = st.session_state.GOLD_BUCKET
+st.set_page_config(layout="wide")
+
+# Access shared state (initializes if needed)
+conn, SILVER_BUCKET, GOLD_BUCKET = get_connection()
 
 # Reduce top padding
 st.markdown("""
@@ -106,6 +107,43 @@ def load_parcel_data(parcel_id: str) -> dict:
     except Exception as e:
         st.error(f"Error loading parcel data: {str(e)}")
         return None
+
+@st.cache_data(ttl=600)  # Cache for 10 minutes
+def load_site_data(site_parcel_id: str) -> dict:
+    """Load site data for metrics display when parcel differs from site."""
+    if not site_parcel_id:
+        return None
+
+    query = f"""
+    SELECT
+        net_taxes_per_sqft_lot,
+        land_value_per_sqft_lot,
+        land_value_alignment_index,
+        current_land_value,
+        current_total_value
+    FROM read_parquet('{GOLD_BUCKET}/fact_sites.parquet')
+    WHERE site_parcel_id = '{site_parcel_id.replace("'", "''")}'
+    AND parcel_year = (
+        SELECT MAX(parcel_year)
+        FROM read_parquet('{GOLD_BUCKET}/fact_sites.parquet')
+    )
+    """
+
+    try:
+        result = conn.execute(query).fetchdf()
+        if len(result) > 0:
+            site = result.to_dict('records')[0]
+            # Calculate land_share_property if not directly available
+            if site.get('current_total_value') and site['current_total_value'] > 0:
+                site['land_share_property'] = site['current_land_value'] / site['current_total_value']
+            else:
+                site['land_share_property'] = None
+            return site
+        return None
+    except Exception as e:
+        st.warning(f"Unable to load site data: {str(e)}")
+        return None
+
 
 @st.cache_data(ttl=600)  # Cache for 10 minutes
 def load_tax_roll_history(parcel_id: str) -> pd.DataFrame:
@@ -446,24 +484,53 @@ if selected_value and selected_value is not None:
                     f"{format_number(parcel_data.get('lot_size'))} sq ft"
                 ]
             })
-            st.dataframe(assessment_data, hide_index=True, use_container_width=True)
+            st.dataframe(assessment_data, hide_index=True, width='stretch')
 
             st.markdown("#### Land Efficiency")
+
+            # Check if parcel differs from site
+            parcel_id_val = parcel_data.get('parcel_id')
+            site_parcel_id = parcel_data.get('site_parcel_id')
+            use_site_metrics = parcel_id_val and site_parcel_id and parcel_id_val != site_parcel_id
+            parcel_land_value_zero = (parcel_data.get('current_land_value') or 0) == 0
+
+            # Load site data if needed
+            site_data = None
+            if use_site_metrics:
+                site_data = load_site_data(site_parcel_id)
+
+            # Build metrics with conditional site values
+            if use_site_metrics and site_data:
+                land_value_label = "Land Value per sqft (site)"
+                land_value_val = f"${format_number(site_data.get('land_value_per_sqft_lot'), decimals=2)}"
+                taxes_label = "Net Taxes per sqft (site)"
+                taxes_val = f"${format_number(site_data.get('net_taxes_per_sqft_lot'), decimals=2)}"
+
+                if parcel_land_value_zero:
+                    land_share_label = "Land Share of Property (site)"
+                    land_share_val = format_percentage(site_data.get('land_share_property', 0) * 100 if site_data.get('land_share_property') else None)
+                    alignment_label = "Land Value Alignment Index (site)"
+                    alignment_val = format_number(site_data.get('land_value_alignment_index'), decimals=2)
+                else:
+                    land_share_label = "Land Share of Property"
+                    land_share_val = format_percentage(parcel_data.get('land_share_property', 0) * 100 if parcel_data.get('land_share_property') else None)
+                    alignment_label = "Land Value Alignment Index"
+                    alignment_val = format_number(parcel_data.get('land_value_alignment_index'), decimals=2)
+            else:
+                land_value_label = "Land Value per sqft"
+                land_value_val = f"${format_number(parcel_data.get('land_value_per_sqft_lot'), decimals=2)}"
+                taxes_label = "Net Taxes per sqft"
+                taxes_val = f"${format_number(parcel_data.get('net_taxes_per_sqft_lot'), decimals=2)}"
+                land_share_label = "Land Share of Property"
+                land_share_val = format_percentage(parcel_data.get('land_share_property', 0) * 100 if parcel_data.get('land_share_property') else None)
+                alignment_label = "Land Value Alignment Index"
+                alignment_val = format_number(parcel_data.get('land_value_alignment_index'), decimals=2)
+
             efficiency_data = pd.DataFrame({
-                "Metric": [
-                    "Land Value per sqft",
-                    "Net Taxes per sqft",
-                    "Land Share of Property",
-                    "Land Value Alignment Index"
-                ],
-                "Value": [
-                    f"${format_number(parcel_data.get('land_value_per_sqft_lot'), decimals=2)}",
-                    f"${format_number(parcel_data.get('net_taxes_per_sqft_lot'), decimals=2)}",
-                    format_percentage(parcel_data.get('land_share_property', 0) * 100 if parcel_data.get('land_share_property') else None),
-                    format_number(parcel_data.get('land_value_alignment_index'), decimals=2)
-                ]
+                "Metric": [land_value_label, taxes_label, land_share_label, alignment_label],
+                "Value": [land_value_val, taxes_val, land_share_val, alignment_val]
             })
-            st.dataframe(efficiency_data, hide_index=True, use_container_width=True)
+            st.dataframe(efficiency_data, hide_index=True, width='stretch')
 
         with right_col:
             # Load historical tax roll data
@@ -504,7 +571,7 @@ if selected_value and selected_value is not None:
                 with chart3_col:
                     # Chart 3: Assessed Values (Total, Land, Improvement)
                     assessed_value_chart = create_assessed_value_trend_chart(tax_history_df)
-                    st.altair_chart(assessed_value_chart, use_container_width=True)
+                    st.altair_chart(assessed_value_chart, width='stretch')
 
                 # Bottom: Grouped bar chart for tax sources (full width)
                 st.markdown("#### Tax Breakdown by Source")
