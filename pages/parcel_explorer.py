@@ -434,14 +434,6 @@ def create_tax_sources_chart(df: pd.DataFrame, group_by: str = "source") -> alt.
 # App title
 st.title("Parcel Explorer")
 
-# Show loaded parcel count if in-memory search is enabled
-if st.session_state.get('address_search_enabled'):
-    try:
-        parcel_count = conn.execute("SELECT COUNT(*) FROM parcel_addresses").fetchone()[0]
-        st.caption(f"📍 {parcel_count:,} parcels loaded")
-    except Exception:
-        pass  # Silently skip if count fails
-
 # Address search on left, selected parcel on right
 search_col, status_col = st.columns([1, 1])
 with search_col:
