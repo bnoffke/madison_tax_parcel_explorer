@@ -30,6 +30,21 @@ def get_connection():
         st.session_state.SILVER_BUCKET = st.secrets["gcs"]["silver_bucket"]
         st.session_state.GOLD_BUCKET = st.secrets["gcs"]["gold_bucket"]
 
+        # Preload parcel addresses into memory for fast searching
+        try:
+            with st.spinner("Loading parcel data..."):
+                conn.execute(f"""
+                    CREATE TEMP TABLE parcel_addresses AS
+                    SELECT parcel_id, full_address
+                    FROM read_parquet('{st.secrets["gcs"]["silver_bucket"]}/fact_parcels.parquet')
+                    WHERE full_address IS NOT NULL
+                """)
+                conn.execute("CREATE INDEX idx_parcel_address ON parcel_addresses(full_address)")
+            st.session_state.address_search_enabled = True
+        except Exception as e:
+            st.warning(f"Could not preload addresses: {e}. Search will use slower mode.")
+            st.session_state.address_search_enabled = False
+
     return (
         st.session_state.conn,
         st.session_state.SILVER_BUCKET,

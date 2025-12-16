@@ -6,6 +6,7 @@ dependencies = [
     "duckdb>=1.4.3",
     "pandas>=2.3.3",
     "pydeck>=0.9.1",
+    "rapidfuzz>=3.0.0",
     "streamlit>=1.52.1",
     "streamlit-searchbox>=0.1.23",
 ]

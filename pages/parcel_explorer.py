@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 from streamlit_searchbox import st_searchbox
+from rapidfuzz import process, fuzz
 
 from utils.db import get_connection
 from utils.formatters import (
@@ -31,7 +32,7 @@ st.markdown("""
 
 def search_addresses(searchterm: str) -> list[tuple[str, str]]:
     """
-    Search for addresses matching the search term using DuckDB lazy loading.
+    Search for addresses using in-memory table with fuzzy matching fallback.
 
     Args:
         searchterm: User's search input
@@ -44,45 +45,72 @@ def search_addresses(searchterm: str) -> list[tuple[str, str]]:
         return []
 
     # Sanitize input to prevent SQL injection
-    searchterm = searchterm.replace("'", "''")
+    searchterm_clean = searchterm.replace("'", "''")
 
-    query = f"""
+    # Check if in-memory search is enabled
+    if st.session_state.get('address_search_enabled', False):
+        try:
+            # Phase 1: Exact substring search from in-memory table
+            exact_query = f"""
+            SELECT full_address, parcel_id
+            FROM parcel_addresses
+            WHERE full_address ILIKE '%{searchterm_clean}%'
+            ORDER BY
+                CASE WHEN full_address ILIKE '{searchterm_clean}%' THEN 1 ELSE 2 END,
+                full_address
+            LIMIT 100
+            """
+            exact_results = conn.execute(exact_query).fetchall()
+
+            # Phase 2: Fuzzy search if exact results are sparse
+            if len(exact_results) < 10:
+                # Get all addresses for fuzzy matching
+                all_addresses = conn.execute(
+                    "SELECT full_address, parcel_id FROM parcel_addresses"
+                ).fetchall()
+
+                # Use RapidFuzz for fuzzy matching
+                fuzzy_matches = process.extract(
+                    searchterm,
+                    [(addr, pid) for addr, pid in all_addresses],
+                    scorer=fuzz.token_set_ratio,
+                    limit=20,
+                    score_cutoff=70,
+                    processor=lambda x: x[0]  # Compare against full_address
+                )
+
+                # Merge results, avoiding duplicates
+                seen_parcels = {pid for _, pid in exact_results}
+                for match, score, _ in fuzzy_matches:
+                    addr, pid = match
+                    if pid not in seen_parcels:
+                        exact_results.append((addr, pid))
+                        seen_parcels.add(pid)
+
+            if not exact_results:
+                return [("No addresses found - try a different search", None)]
+
+            return [(addr, pid) for addr, pid in exact_results[:100]]
+
+        except Exception as e:
+            st.warning(f"In-memory search failed: {e}. Falling back to direct query.")
+            # Fall through to fallback mode
+
+    # Fallback: Query GCS parquet directly
+    fallback_query = f"""
     SELECT
-        TRIM(
-            CONCAT(
-                CAST(house_nbr AS VARCHAR),
-                CASE WHEN street_dir IS NOT NULL AND street_dir != '' THEN ' ' || street_dir ELSE '' END,
-                ' ', street_name,
-                CASE WHEN street_type IS NOT NULL AND street_type != '' THEN ' ' || street_type ELSE '' END,
-                CASE WHEN unit IS NOT NULL AND unit != '' THEN ' Unit ' || CAST(unit AS VARCHAR) ELSE '' END
-            )
-        ) AS full_address,
+        full_address,
         parcel_id
     FROM read_parquet('{SILVER_BUCKET}/fact_parcels.parquet')
-    WHERE CONCAT(
-        CAST(house_nbr AS VARCHAR),
-        CASE WHEN street_dir IS NOT NULL AND street_dir != '' THEN ' ' || street_dir ELSE '' END,
-        ' ', street_name,
-        CASE WHEN street_type IS NOT NULL AND street_type != '' THEN ' ' || street_type ELSE '' END,
-        CASE WHEN unit IS NOT NULL AND unit != '' THEN ' Unit ' || CAST(unit AS VARCHAR) ELSE '' END
-    ) ILIKE '%{searchterm}%'
+    WHERE full_address ILIKE '%{searchterm_clean}%'
     ORDER BY
-        CASE
-            WHEN CONCAT(
-                CAST(house_nbr AS VARCHAR),
-                CASE WHEN street_dir IS NOT NULL AND street_dir != '' THEN ' ' || street_dir ELSE '' END,
-                ' ', street_name,
-                CASE WHEN street_type IS NOT NULL AND street_type != '' THEN ' ' || street_type ELSE '' END,
-                CASE WHEN unit IS NOT NULL AND unit != '' THEN ' Unit ' || CAST(unit AS VARCHAR) ELSE '' END
-            ) ILIKE '{searchterm}%' THEN 1
-            ELSE 2
-        END,
-        house_nbr, street_name
+        CASE WHEN full_address ILIKE '{searchterm_clean}%' THEN 1 ELSE 2 END,
+        full_address
     LIMIT 100
     """
 
     try:
-        results = conn.execute(query).fetchall()
+        results = conn.execute(fallback_query).fetchall()
         if not results:
             return [("No addresses found - try a different search", None)]
         return [(addr, pid) for addr, pid in results]
@@ -405,6 +433,14 @@ def create_tax_sources_chart(df: pd.DataFrame, group_by: str = "source") -> alt.
 
 # App title
 st.title("Parcel Explorer")
+
+# Show loaded parcel count if in-memory search is enabled
+if st.session_state.get('address_search_enabled'):
+    try:
+        parcel_count = conn.execute("SELECT COUNT(*) FROM parcel_addresses").fetchone()[0]
+        st.caption(f"📍 {parcel_count:,} parcels loaded")
+    except Exception:
+        pass  # Silently skip if count fails
 
 # Address search on left, selected parcel on right
 search_col, status_col = st.columns([1, 1])
