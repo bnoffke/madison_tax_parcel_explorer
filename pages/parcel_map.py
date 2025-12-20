@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import pydeck as pdk
 import json
 import numpy as np
 
@@ -110,11 +109,73 @@ def calculate_colors(values: np.ndarray) -> tuple[list, float, float]:
     return colors, p2, p98
 
 
+def colors_to_css(colors: list) -> list[str]:
+    """Convert RGBA color arrays to CSS rgba() strings for MapLibre."""
+    return [f"rgba({c[0]},{c[1]},{c[2]},{c[3]/255:.2f})" for c in colors]
+
+
 def swap_coordinates(coords):
     """Recursively swap [lat, lon] to [lon, lat] for GeoJSON compliance."""
     if isinstance(coords[0], list):
         return [swap_coordinates(c) for c in coords]
     return [coords[1], coords[0]]
+
+
+def swap_coordinates_with_precision(coords, precision=6):
+    """Swap [lat, lon] to [lon, lat] and round coordinates to reduce GeoJSON size."""
+    if isinstance(coords[0], list):
+        return [swap_coordinates_with_precision(c, precision) for c in coords]
+    return [round(coords[1], precision), round(coords[0], precision)]
+
+
+def build_geojson_maplibre(df: pd.DataFrame, metric: str) -> tuple[dict, float, float]:
+    """Build GeoJSON optimized for MapLibre with feature IDs and color properties."""
+    values = df[metric].values
+    colors, p2, p98 = calculate_colors(values)
+    css_colors = colors_to_css(colors)  # Convert to CSS strings
+
+    features = []
+    for i, (_, row) in enumerate(df.iterrows()):
+        try:
+            geometry = json.loads(row['geom_4326_geojson'])
+            # Swap coordinates from [lat, lon] to [lon, lat] and reduce precision
+            geometry['coordinates'] = swap_coordinates_with_precision(
+                geometry['coordinates'],
+                precision=6
+            )
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        features.append({
+            "type": "Feature",
+            "id": i,  # Numeric ID for setFeatureState
+            "geometry": geometry,
+            "properties": {
+                # Identifiers
+                "site_parcel_id": row['site_parcel_id'],
+                "address": row['parcel_address'] or "N/A",
+
+                # Display values (formatted strings for tooltip)
+                "display_total_value": f"${row['current_total_value']:,.0f}" if pd.notna(row['current_total_value']) else "N/A",
+                "display_land_value": f"${row['current_land_value']:,.0f}" if pd.notna(row['current_land_value']) else "N/A",
+                "display_lot_size": f"{row['lot_size']:,.0f} sq ft" if pd.notna(row['lot_size']) else "N/A",
+                "display_net_taxes": f"${row['net_taxes']:,.0f}" if pd.notna(row['net_taxes']) else "N/A",
+
+                # Raw values (numbers for comparison)
+                "total_value": float(row['current_total_value']) if pd.notna(row['current_total_value']) else 0,
+                "land_value": float(row['current_land_value']) if pd.notna(row['current_land_value']) else 0,
+                "lot_size": float(row['lot_size']) if pd.notna(row['lot_size']) else 0,
+                "net_taxes": float(row['net_taxes']) if pd.notna(row['net_taxes']) else 0,
+                "net_taxes_per_sqft": float(row['net_taxes_per_sqft_lot']) if pd.notna(row['net_taxes_per_sqft_lot']) else 0,
+                "land_value_per_sqft": float(row['land_value_per_sqft_lot']) if pd.notna(row['land_value_per_sqft_lot']) else 0,
+                "alignment_index": float(row['land_value_alignment_index']) if pd.notna(row['land_value_alignment_index']) else 0,
+
+                # Pre-computed color (CSS rgba string)
+                "fillColor": css_colors[i]
+            }
+        })
+
+    return {"type": "FeatureCollection", "features": features}, p2, p98
 
 
 def build_geojson(df: pd.DataFrame, metric: str) -> dict:
@@ -175,10 +236,22 @@ with st.sidebar:
     
 
 # Main content
-with st.spinner("Loading map data..."):
+with st.status("Loading map data...", expanded=True) as status:
+    st.write("📊 Querying parcel database...")
     df = load_map_data()
+    st.write(f"✅ Loaded {len(df):,} parcels from database")
+
     if not df.empty:
-        geojson_data, p2, p98 = build_geojson(df, selected_metric)
+        st.write("🗺️ Building GeoJSON with colors...")
+        geojson_data, p2, p98 = build_geojson_maplibre(df, selected_metric)
+
+        # Calculate GeoJSON size
+        import sys
+        geojson_size_mb = sys.getsizeof(str(geojson_data)) / (1024 * 1024)
+        st.write(f"✅ Generated GeoJSON: {len(geojson_data['features']):,} features ({geojson_size_mb:.1f} MB)")
+        st.write("📡 Transferring to browser...")
+
+    status.update(label="Map data ready!", state="complete")
 
 if df.empty:
     st.warning("No parcel data available. Please check the data source.")
@@ -191,59 +264,127 @@ else:
         else:
             st.caption(f"Range: ${p2:.2f} - ${p98:.2f}")
         st.caption(f"Showing {len(geojson_data['features']):,} parcels")
-
         st.info("Map may take a minute to load.")
 
-    # Pydeck layer
-    layer = pdk.Layer(
-        "GeoJsonLayer",
-        data=geojson_data,
-        pickable=True,
-        filled=True,
-        stroked=True,
-        get_fill_color="properties.color",
-        get_line_color=[255, 255, 255, 100],
-        line_width_min_pixels=0,
+    # Render MapLibre component (v2: no height parameter, controlled by CSS)
+    from components.maplibre_parcel_map import render_maplibre_map
+
+    component_value = render_maplibre_map(
+        geojson_data=geojson_data,
+        center=[43.0731, -89.4012],  # Madison, WI [lat, lon]
+        zoom=11
     )
 
-    # View state centered on Madison
-    view_state = pdk.ViewState(
-        latitude=43.0731,
-        longitude=-89.4012,
-        zoom=11,
-        pitch=0,
-        bearing=0,
-    )
+    # Store selected parcels in session state
+    if component_value and component_value.get('selected_features'):
+        st.session_state.map_selected_parcels = component_value['selected_features']
+    else:
+        st.session_state.map_selected_parcels = []
 
-    # Tooltip
-    tooltip = {
-        "html": """
-        <b>{parcel_address}</b><br/>
-        <b>Assessed Value:</b> ${current_total_value}<br/>
-        <b>Land Value:</b> ${current_land_value}<br/>
-        <b>Improvement:</b> ${current_improvement_value}<br/>
-        <b>Lot Size:</b> {lot_size} sq ft<br/>
-        <b>Net Taxes:</b> ${net_taxes}<br/>
-        <hr style="margin: 5px 0;"/>
-        <b>Net Taxes/sqft:</b> ${net_taxes_per_sqft_lot}<br/>
-        <b>Land Value/sqft:</b> ${land_value_per_sqft_lot}<br/>
-        <b>Alignment Index:</b> {land_value_alignment_index}
-        """,
-        "style": {
-            "backgroundColor": "steelblue",
-            "color": "white",
-            "fontSize": "12px",
-            "padding": "10px",
-        }
-    }
+    # Comparison panel (fragment - only reruns when button clicked)
+    st.markdown("---")
 
-    # Render map
-    st.pydeck_chart(
-        pdk.Deck(
-            layers=[layer],
-            initial_view_state=view_state,
-            tooltip=tooltip,
-            map_style="light",
-        ),
-        height=700,
-    )
+    @st.fragment
+    def comparison_panel():
+        """Render comparison panel for selected parcels."""
+        selected = st.session_state.get('map_selected_parcels', [])
+
+        if len(selected) == 0:
+            st.info("👆 Click parcels on the map to select them for comparison (max 2)")
+            return
+
+        if len(selected) == 1:
+            st.info(f"✓ Selected 1 parcel. Select one more to compare.")
+            show_single_parcel_summary(selected[0])
+            return
+
+        # Show compare button when 2 parcels selected
+        if st.button("📊 Compare Selected Parcels", type="primary", use_container_width=True):
+            show_parcel_comparison(selected[0], selected[1])
+
+    def show_single_parcel_summary(parcel: dict):
+        """Show summary for a single selected parcel."""
+        st.markdown(f"### {parcel['address']}")
+        st.caption(f"Parcel ID: {parcel['id']}")
+
+        col1, col2, col3 = st.columns(3)
+
+        props = parcel['properties']
+
+        with col1:
+            st.metric("Total Value", format_currency(props['total_value']))
+            st.metric("Lot Size", f"{format_number(props['lot_size'])} sq ft")
+
+        with col2:
+            st.metric("Net Taxes", format_currency(props['net_taxes']))
+            st.metric("Net Taxes/sqft", f"${props['net_taxes_per_sqft']:.2f}")
+
+        with col3:
+            st.metric("Land Value/sqft", f"${props['land_value_per_sqft']:.2f}")
+            st.metric("Alignment Index", f"{props['alignment_index']:.2f}")
+
+    def show_parcel_comparison(parcel1: dict, parcel2: dict):
+        """Show side-by-side comparison of two parcels."""
+        st.markdown("### 📊 Parcel Comparison")
+
+        # Header row
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f"#### {parcel1['address']}")
+            st.caption(f"ID: {parcel1['id']}")
+        with col2:
+            st.markdown(f"#### {parcel2['address']}")
+            st.caption(f"ID: {parcel2['id']}")
+
+        st.markdown("---")
+
+        # Metrics comparison
+        props1 = parcel1['properties']
+        props2 = parcel2['properties']
+
+        metrics = [
+            ("Total Assessed Value", "total_value", True),
+            ("Land Value", "land_value", True),
+            ("Lot Size", "lot_size", False),
+            ("Net Taxes", "net_taxes", True),
+            ("Net Taxes per sqft", "net_taxes_per_sqft", False),
+            ("Land Value per sqft", "land_value_per_sqft", False),
+            ("Alignment Index", "alignment_index", False),
+        ]
+
+        for metric_name, metric_key, is_currency in metrics:
+            col1, col2 = st.columns(2)
+
+            val1 = props1.get(metric_key, 0)
+            val2 = props2.get(metric_key, 0)
+
+            with col1:
+                if is_currency:
+                    st.metric(metric_name, format_currency(val1))
+                elif metric_key == "lot_size":
+                    st.metric(metric_name, f"{format_number(val1)} sq ft")
+                else:
+                    st.metric(metric_name, f"{val1:.2f}")
+
+            with col2:
+                delta = val2 - val1 if val1 and val2 else None
+                if is_currency:
+                    st.metric(
+                        metric_name,
+                        format_currency(val2),
+                        delta=format_currency(delta) if delta else None
+                    )
+                elif metric_key == "lot_size":
+                    st.metric(
+                        metric_name,
+                        f"{format_number(val2)} sq ft",
+                        delta=f"{format_number(delta)} sq ft" if delta else None
+                    )
+                else:
+                    st.metric(
+                        metric_name,
+                        f"{val2:.2f}",
+                        delta=f"{delta:+.2f}" if delta else None
+                    )
+
+    comparison_panel()
