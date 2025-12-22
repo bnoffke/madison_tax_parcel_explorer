@@ -16,6 +16,17 @@ METRICS = {
     "Land Value Alignment Index": "land_value_alignment_index",
 }
 
+# Comparison metrics configuration
+COMPARISON_METRICS = [
+    {"label": "Total Value", "key": "total_value", "type": "currency", "decimals": 0},
+    {"label": "Land Value", "key": "land_value", "type": "currency", "decimals": 0},
+    {"label": "Lot Size", "key": "lot_size", "type": "area", "decimals": 0},
+    {"label": "Net Taxes", "key": "net_taxes", "type": "currency", "decimals": 0},
+    {"label": "Net Taxes/sqft", "key": "net_taxes_per_sqft", "type": "currency", "decimals": 2},
+    {"label": "Land Value/sqft", "key": "land_value_per_sqft", "type": "currency", "decimals": 2},
+    {"label": "Alignment Index", "key": "alignment_index", "type": "number", "decimals": 2}
+]
+
 # Magma colormap stops (normalized position, RGB) - reversed
 # Perceptually uniform gradient: light -> orange -> magenta -> purple -> dark
 MAGMA_STOPS = [
@@ -112,6 +123,133 @@ def calculate_colors(values: np.ndarray) -> tuple[list, float, float]:
 def colors_to_css(colors: list) -> list[str]:
     """Convert RGBA color arrays to CSS rgba() strings for MapLibre."""
     return [f"rgba({c[0]},{c[1]},{c[2]},{c[3]/255:.2f})" for c in colors]
+
+
+def format_metric_value(value, metric_config):
+    """
+    Format a metric value based on its type.
+
+    Args:
+        value: Raw numeric value
+        metric_config: Dict with 'type' and 'decimals' keys
+
+    Returns:
+        Formatted string
+    """
+    if value is None or pd.isna(value):
+        return "N/A"
+
+    metric_type = metric_config.get('type')
+    decimals = metric_config.get('decimals', 0)
+
+    if metric_type == 'currency':
+        if decimals == 0:
+            return format_currency(value)
+        else:
+            return f"${value:.{decimals}f}"
+    elif metric_type == 'area':
+        return f"{format_number(value, decimals=decimals)} sq ft"
+    elif metric_type == 'number':
+        return format_number(value, decimals=decimals)
+    else:
+        return str(value)
+
+
+def calculate_metric_delta(val1, val2, metric_config):
+    """
+    Calculate and format the difference between two metric values.
+
+    Args:
+        val1: First value (baseline)
+        val2: Second value
+        metric_config: Dict with 'type' and 'decimals' keys
+
+    Returns:
+        Formatted delta string with +/- sign
+    """
+    if val1 is None or val2 is None or pd.isna(val1) or pd.isna(val2):
+        return "N/A"
+
+    delta = val2 - val1
+    metric_type = metric_config.get('type')
+    decimals = metric_config.get('decimals', 0)
+
+    # Sign prefix
+    sign = "+" if delta > 0 else ""
+
+    if metric_type == 'currency':
+        if decimals == 0:
+            return f"{sign}{format_currency(delta)}"
+        else:
+            return f"{sign}${delta:.{decimals}f}"
+    elif metric_type == 'area':
+        return f"{sign}{format_number(delta, decimals=decimals)} sq ft"
+    elif metric_type == 'number':
+        if decimals == 0:
+            return f"{sign}{format_number(delta, decimals=decimals)}"
+        else:
+            return f"{sign}{delta:.{decimals}f}"
+    else:
+        return f"{sign}{delta}"
+
+
+def build_comparison_dataframe(parcels: list) -> pd.DataFrame:
+    """
+    Build a comparison dataframe with metrics as rows and parcels as columns.
+
+    Args:
+        parcels: List of parcel dicts (0, 1, or 2 parcels)
+
+    Returns:
+        DataFrame with:
+        - Index: Metric names
+        - Columns: "Parcel 1", "Parcel 2" (if 2 parcels), "Difference" (if 2 parcels)
+    """
+    num_parcels = len(parcels)
+
+    # Build data dictionary
+    data = {"Metric": [m["label"] for m in COMPARISON_METRICS]}
+
+    if num_parcels >= 1:
+        # Parcel 1 column
+        parcel1_values = []
+        for metric in COMPARISON_METRICS:
+            value = parcels[0]['properties'].get(metric['key'], None)
+            formatted = format_metric_value(value, metric)
+            parcel1_values.append(formatted)
+
+        # Use truncated address for column name
+        addr1 = parcels[0]['address']
+        col1_name = addr1[:30] + "..." if len(addr1) > 30 else addr1
+        data[col1_name] = parcel1_values
+
+    if num_parcels == 2:
+        # Parcel 2 column
+        parcel2_values = []
+        for metric in COMPARISON_METRICS:
+            value = parcels[1]['properties'].get(metric['key'], None)
+            formatted = format_metric_value(value, metric)
+            parcel2_values.append(formatted)
+
+        addr2 = parcels[1]['address']
+        col2_name = addr2[:30] + "..." if len(addr2) > 30 else addr2
+        data[col2_name] = parcel2_values
+
+        # Difference column
+        diff_values = []
+        for metric in COMPARISON_METRICS:
+            val1 = parcels[0]['properties'].get(metric['key'], None)
+            val2 = parcels[1]['properties'].get(metric['key'], None)
+            delta = calculate_metric_delta(val1, val2, metric)
+            diff_values.append(delta)
+
+        data["Difference"] = diff_values
+
+    # Create DataFrame with Metric as index
+    df = pd.DataFrame(data)
+    df.set_index('Metric', inplace=True)
+
+    return df
 
 
 def swap_coordinates(coords):
@@ -233,25 +371,11 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    
+# Load parcel data and build map visualization
+df = load_map_data()
 
-# Main content
-with st.status("Loading map data...", expanded=True) as status:
-    st.write("📊 Querying parcel database...")
-    df = load_map_data()
-    st.write(f"✅ Loaded {len(df):,} parcels from database")
-
-    if not df.empty:
-        st.write("🗺️ Building GeoJSON with colors...")
-        geojson_data, p2, p98 = build_geojson_maplibre(df, selected_metric)
-
-        # Calculate GeoJSON size
-        import sys
-        geojson_size_mb = sys.getsizeof(str(geojson_data)) / (1024 * 1024)
-        st.write(f"✅ Generated GeoJSON: {len(geojson_data['features']):,} features ({geojson_size_mb:.1f} MB)")
-        st.write("📡 Transferring to browser...")
-
-    status.update(label="Map data ready!", state="complete")
+if not df.empty:
+    geojson_data, p2, p98 = build_geojson_maplibre(df, selected_metric)
 
 if df.empty:
     st.warning("No parcel data available. Please check the data source.")
@@ -266,9 +390,13 @@ else:
         st.caption(f"Showing {len(geojson_data['features']):,} parcels")
         st.info("Map may take a minute to load.")
 
-    # Render MapLibre component (v2: no height parameter, controlled by CSS)
+    # Import map component
     from components.maplibre_parcel_map import render_maplibre_map
 
+    # Reserve space for button (will be filled after map updates state)
+    button_placeholder = st.empty()
+
+    # Render MapLibre component at full width (v2: no height parameter, controlled by CSS)
     component_value = render_maplibre_map(
         geojson_data=geojson_data,
         center=[43.0731, -89.4012],  # Madison, WI [lat, lon]
@@ -281,110 +409,31 @@ else:
     else:
         st.session_state.map_selected_parcels = []
 
-    # Comparison panel (fragment - only reruns when button clicked)
-    st.markdown("---")
+    # NOW render button in placeholder with updated state
+    with button_placeholder.container():
+        # Comparison popover button
+        def comparison_popover():
+            """Render comparison popover for selected parcels."""
+            selected = st.session_state.get('map_selected_parcels', [])
+            num_selected = len(selected)
 
-    @st.fragment
-    def comparison_panel():
-        """Render comparison panel for selected parcels."""
-        selected = st.session_state.get('map_selected_parcels', [])
+            # Popover button - always visible
+            with st.popover("🏘️Compare Parcels", icon="🏢", help="View comparison of selected parcels",width=600):
+                # State 0: No parcels selected
+                if num_selected == 0:
+                    st.info("👆 Click parcels on the map to compare (max 2)")
+                    return
 
-        if len(selected) == 0:
-            st.info("👆 Click parcels on the map to select them for comparison (max 2)")
-            return
+                # State 1: One parcel selected
+                if num_selected == 1:
+                    df = build_comparison_dataframe(selected)
+                    st.dataframe(df)
 
-        if len(selected) == 1:
-            st.info(f"✓ Selected 1 parcel. Select one more to compare.")
-            show_single_parcel_summary(selected[0])
-            return
+                    st.info("Select one more parcel to compare")
+                    return
 
-        # Show compare button when 2 parcels selected
-        if st.button("📊 Compare Selected Parcels", type="primary", use_container_width=True):
-            show_parcel_comparison(selected[0], selected[1])
+                # State 2: Two parcels selected
+                df = build_comparison_dataframe(selected)
+                st.dataframe(df)
 
-    def show_single_parcel_summary(parcel: dict):
-        """Show summary for a single selected parcel."""
-        st.markdown(f"### {parcel['address']}")
-        st.caption(f"Parcel ID: {parcel['id']}")
-
-        col1, col2, col3 = st.columns(3)
-
-        props = parcel['properties']
-
-        with col1:
-            st.metric("Total Value", format_currency(props['total_value']))
-            st.metric("Lot Size", f"{format_number(props['lot_size'])} sq ft")
-
-        with col2:
-            st.metric("Net Taxes", format_currency(props['net_taxes']))
-            st.metric("Net Taxes/sqft", f"${props['net_taxes_per_sqft']:.2f}")
-
-        with col3:
-            st.metric("Land Value/sqft", f"${props['land_value_per_sqft']:.2f}")
-            st.metric("Alignment Index", f"{props['alignment_index']:.2f}")
-
-    def show_parcel_comparison(parcel1: dict, parcel2: dict):
-        """Show side-by-side comparison of two parcels."""
-        st.markdown("### 📊 Parcel Comparison")
-
-        # Header row
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown(f"#### {parcel1['address']}")
-            st.caption(f"ID: {parcel1['id']}")
-        with col2:
-            st.markdown(f"#### {parcel2['address']}")
-            st.caption(f"ID: {parcel2['id']}")
-
-        st.markdown("---")
-
-        # Metrics comparison
-        props1 = parcel1['properties']
-        props2 = parcel2['properties']
-
-        metrics = [
-            ("Total Assessed Value", "total_value", True),
-            ("Land Value", "land_value", True),
-            ("Lot Size", "lot_size", False),
-            ("Net Taxes", "net_taxes", True),
-            ("Net Taxes per sqft", "net_taxes_per_sqft", False),
-            ("Land Value per sqft", "land_value_per_sqft", False),
-            ("Alignment Index", "alignment_index", False),
-        ]
-
-        for metric_name, metric_key, is_currency in metrics:
-            col1, col2 = st.columns(2)
-
-            val1 = props1.get(metric_key, 0)
-            val2 = props2.get(metric_key, 0)
-
-            with col1:
-                if is_currency:
-                    st.metric(metric_name, format_currency(val1))
-                elif metric_key == "lot_size":
-                    st.metric(metric_name, f"{format_number(val1)} sq ft")
-                else:
-                    st.metric(metric_name, f"{val1:.2f}")
-
-            with col2:
-                delta = val2 - val1 if val1 and val2 else None
-                if is_currency:
-                    st.metric(
-                        metric_name,
-                        format_currency(val2),
-                        delta=format_currency(delta) if delta else None
-                    )
-                elif metric_key == "lot_size":
-                    st.metric(
-                        metric_name,
-                        f"{format_number(val2)} sq ft",
-                        delta=f"{format_number(delta)} sq ft" if delta else None
-                    )
-                else:
-                    st.metric(
-                        metric_name,
-                        f"{val2:.2f}",
-                        delta=f"{delta:+.2f}" if delta else None
-                    )
-
-    comparison_panel()
+        comparison_popover()

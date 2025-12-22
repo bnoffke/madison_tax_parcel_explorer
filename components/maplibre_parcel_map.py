@@ -182,8 +182,7 @@ export default function(component) {
         console.log('Adding parcel source...');
         map.addSource('parcels', {
             type: 'geojson',
-            data: data.geojson,
-            promoteId: 'id'
+            data: data.geojson
         });
         console.log('Parcel source added');
 
