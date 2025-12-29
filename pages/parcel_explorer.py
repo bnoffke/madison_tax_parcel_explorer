@@ -2,9 +2,8 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 from streamlit_searchbox import st_searchbox
-from rapidfuzz import process, fuzz
 
-from utils.db import get_connection
+from utils.db import get_connection, load_address_data
 from utils.formatters import (
     format_currency,
     format_percentage,
@@ -30,9 +29,34 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 
+def all_tokens_present(text: str, tokens: list[str]) -> bool:
+    """
+    Check if all search tokens appear in text in order.
+
+    Args:
+        text: The text to search within (lowercased)
+        tokens: List of search tokens (lowercased)
+
+    Returns:
+        True if all tokens found in order, False otherwise
+    """
+    pos = 0
+    for token in tokens:
+        pos = text.find(token, pos)
+        if pos == -1:
+            return False
+        pos += len(token)
+    return True
+
+
 def search_addresses(searchterm: str) -> list[tuple[str, str]]:
     """
-    Search for addresses using in-memory table with fuzzy matching fallback.
+    Search for addresses using token-based wildcard matching.
+
+    Splits search term by spaces and finds addresses containing all tokens
+    in order. Much simpler and faster than fuzzy matching.
+
+    Example: "602 w" finds "602 W Washington Ave" but not "10 Maple Wood Ln"
 
     Args:
         searchterm: User's search input
@@ -44,100 +68,58 @@ def search_addresses(searchterm: str) -> list[tuple[str, str]]:
     if not searchterm or len(searchterm) < 2:
         return []
 
-    # Sanitize input to prevent SQL injection
-    searchterm_clean = searchterm.replace("'", "''")
-
-    # Check if in-memory search is enabled
-    if st.session_state.get('address_search_enabled', False):
-        try:
-            # Phase 1: Exact substring search from in-memory table
-            exact_query = f"""
-            SELECT full_address, parcel_id
-            FROM parcel_addresses
-            WHERE full_address ILIKE '%{searchterm_clean}%'
-            ORDER BY
-                CASE WHEN full_address ILIKE '{searchterm_clean}%' THEN 1 ELSE 2 END,
-                full_address
-            LIMIT 100
-            """
-            exact_results = conn.execute(exact_query).fetchall()
-
-            # Phase 2: Fuzzy search if exact results are sparse
-            if len(exact_results) < 10:
-                # Get all addresses for fuzzy matching
-                all_addresses = conn.execute(
-                    "SELECT full_address, parcel_id FROM parcel_addresses"
-                ).fetchall()
-
-                # Use RapidFuzz for fuzzy matching
-                fuzzy_matches = process.extract(
-                    searchterm,
-                    [(addr, pid) for addr, pid in all_addresses],
-                    scorer=fuzz.token_set_ratio,
-                    limit=20,
-                    score_cutoff=70,
-                    processor=lambda x: x[0]  # Compare against full_address
-                )
-
-                # Merge results, avoiding duplicates
-                seen_parcels = {pid for _, pid in exact_results}
-                for match, score, _ in fuzzy_matches:
-                    addr, pid = match
-                    if pid not in seen_parcels:
-                        exact_results.append((addr, pid))
-                        seen_parcels.add(pid)
-
-            if not exact_results:
-                return [("No addresses found - try a different search", None)]
-
-            return [(addr, pid) for addr, pid in exact_results[:100]]
-
-        except Exception as e:
-            st.warning(f"In-memory search failed: {e}. Falling back to direct query.")
-            # Fall through to fallback mode
-
-    # Fallback: Query GCS parquet directly
-    fallback_query = f"""
-    SELECT
-        full_address,
-        parcel_id
-    FROM read_parquet('{SILVER_BUCKET}/fact_parcels.parquet')
-    WHERE full_address ILIKE '%{searchterm_clean}%'
-    ORDER BY
-        CASE WHEN full_address ILIKE '{searchterm_clean}%' THEN 1 ELSE 2 END,
-        full_address
-    LIMIT 100
-    """
-
     try:
-        results = conn.execute(fallback_query).fetchall()
+        # Get cached address data (shared across all sessions)
+        address_data = load_address_data(conn, SILVER_BUCKET)
+        tokens = searchterm.lower().split()
+
+        # Separate results by starts-with vs contains
+        starts_with = []
+        contains = []
+
+        for addr, pid in address_data:
+            addr_lower = addr.lower()
+
+            # Check if all search tokens appear in address (in order)
+            if all_tokens_present(addr_lower, tokens):
+                if addr_lower.startswith(tokens[0]):
+                    starts_with.append((addr, pid))
+                else:
+                    contains.append((addr, pid))
+
+        # Combine results: starts-with first, then contains
+        results = starts_with + contains
+
         if not results:
             return [("No addresses found - try a different search", None)]
-        return [(addr, pid) for addr, pid in results]
+
+        return results[:100]
+
     except Exception as e:
-        return [(f"Error searching addresses: {str(e)}", None)]
+        st.error(f"Error searching addresses: {e}")
+        return []
 
 @st.cache_data(ttl=600)  # Cache for 10 minutes
-def load_parcel_data(parcel_id: str) -> dict:
+def load_parcel_data(_conn, parcel_id: str, silver_bucket: str) -> dict:
     """Load complete parcel data including geometry for selected parcel."""
     if not parcel_id:
         return None
 
     query = f"""
     SELECT *
-    FROM read_parquet('{SILVER_BUCKET}/fact_parcels.parquet')
+    FROM read_parquet('{silver_bucket}/fact_parcels.parquet')
     WHERE parcel_id = '{parcel_id.replace("'", "''")}'
     """
 
     try:
-        result = conn.execute(query).fetchdf()
+        result = _conn.execute(query).fetchdf()
         return result.to_dict('records')[0] if len(result) > 0 else None
     except Exception as e:
         st.error(f"Error loading parcel data: {str(e)}")
         return None
 
 @st.cache_data(ttl=600)  # Cache for 10 minutes
-def load_site_data(site_parcel_id: str) -> dict:
+def load_site_data(_conn, site_parcel_id: str, gold_bucket: str) -> dict:
     """Load site data for metrics display when parcel differs from site."""
     if not site_parcel_id:
         return None
@@ -149,16 +131,16 @@ def load_site_data(site_parcel_id: str) -> dict:
         land_value_alignment_index,
         current_land_value,
         current_total_value
-    FROM read_parquet('{GOLD_BUCKET}/fact_sites.parquet')
+    FROM read_parquet('{gold_bucket}/fact_sites.parquet')
     WHERE site_parcel_id = '{site_parcel_id.replace("'", "''")}'
     AND parcel_year = (
         SELECT MAX(parcel_year)
-        FROM read_parquet('{GOLD_BUCKET}/fact_sites.parquet')
+        FROM read_parquet('{gold_bucket}/fact_sites.parquet')
     )
     """
 
     try:
-        result = conn.execute(query).fetchdf()
+        result = _conn.execute(query).fetchdf()
         if len(result) > 0:
             site = result.to_dict('records')[0]
             # Calculate land_share_property if not directly available
@@ -174,12 +156,14 @@ def load_site_data(site_parcel_id: str) -> dict:
 
 
 @st.cache_data(ttl=600)  # Cache for 10 minutes
-def load_tax_roll_history(parcel_id: str) -> pd.DataFrame:
+def load_tax_roll_history(_conn, parcel_id: str, silver_bucket: str) -> pd.DataFrame:
     """
     Load historical tax roll data for a specific parcel.
 
     Args:
+        _conn: DuckDB connection (not hashed by Streamlit)
         parcel_id: The parcel ID to filter by
+        silver_bucket: GCS bucket path for silver layer data
 
     Returns:
         DataFrame with columns: tax_year, total_assessed_value, net_tax,
@@ -200,13 +184,13 @@ def load_tax_roll_history(parcel_id: str) -> pd.DataFrame:
         county_tax,
         school_tax,
         matc_tax
-    FROM read_parquet('{SILVER_BUCKET}/fact_tax_roll.parquet')
+    FROM read_parquet('{silver_bucket}/fact_tax_roll.parquet')
     WHERE parcel_id = '{parcel_id.replace("'", "''")}'
     ORDER BY tax_year
     """
 
     try:
-        result = conn.execute(query).fetchdf()
+        result = _conn.execute(query).fetchdf()
 
         if len(result) == 0:
             return pd.DataFrame()
@@ -457,7 +441,7 @@ with status_col:
             msg_col, popover_col = st.columns([3, 1])
             with msg_col:
                 # Load parcel data to get the address
-                parcel_data_for_display = load_parcel_data(parcel_id)
+                parcel_data_for_display = load_parcel_data(conn, parcel_id, SILVER_BUCKET)
                 if parcel_data_for_display:
                     address = format_address(parcel_data_for_display)
                     st.success(f"**{address}**  (Parcel: {parcel_id})")
@@ -465,7 +449,7 @@ with status_col:
                     st.success(f"Selected parcel: {parcel_id}")
             with popover_col:
                 with st.popover("Property Details"):
-                    if parcel_data := load_parcel_data(parcel_id):
+                    if parcel_data := load_parcel_data(conn, parcel_id, SILVER_BUCKET):
                         char_col1, char_col2, char_col3 = st.columns(3)
 
                         with char_col1:
@@ -488,7 +472,7 @@ if selected_value and selected_value is not None:
 
     # Load parcel data
     with st.spinner("Loading parcel data..."):
-        parcel_data = load_parcel_data(parcel_id)
+        parcel_data = load_parcel_data(conn, parcel_id, SILVER_BUCKET)
 
     if parcel_data:
         # Layout: slim left column (20%) for tables, wide right column (80%) for charts
@@ -525,7 +509,7 @@ if selected_value and selected_value is not None:
             # Load site data if needed
             site_data = None
             if use_site_metrics:
-                site_data = load_site_data(site_parcel_id)
+                site_data = load_site_data(conn, site_parcel_id, GOLD_BUCKET)
 
             # Build metrics with conditional site values
             if use_site_metrics and site_data:
@@ -562,7 +546,7 @@ if selected_value and selected_value is not None:
 
         with right_col:
             # Load historical tax roll data
-            tax_history_df = load_tax_roll_history(parcel_id)
+            tax_history_df = load_tax_roll_history(conn, parcel_id, SILVER_BUCKET)
 
             if not tax_history_df.empty and len(tax_history_df) >= 2:
                 st.markdown("#### Historical Trends")
