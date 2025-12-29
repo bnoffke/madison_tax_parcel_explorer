@@ -1,52 +1,75 @@
-"""DuckDB connection management for Streamlit session state."""
+"""DuckDB connection management using Streamlit caching."""
 
 import streamlit as st
 import duckdb
 
 
+@st.cache_resource
+def get_duckdb_connection():
+    """
+    Get or create a shared DuckDB connection (app-wide singleton).
+
+    This connection is shared across all user sessions and persists
+    for the lifetime of the Streamlit app.
+
+    Returns:
+        duckdb.DuckDBPyConnection: Shared DuckDB connection
+    """
+    conn = duckdb.connect()  # In-memory database
+
+    # Load extensions (once for all sessions)
+    conn.execute("""
+        INSTALL httpfs;
+        LOAD httpfs;
+        INSTALL spatial;
+        LOAD spatial;
+    """)
+
+    # Create GCS secret (once for all sessions)
+    conn.execute(f"""
+        CREATE SECRET gcs_secret (
+            TYPE gcs,
+            KEY_ID '{st.secrets["gcs"]["key_id"]}',
+            SECRET '{st.secrets["gcs"]["secret"]}'
+        );
+    """)
+
+    return conn
+
+
+@st.cache_data(ttl=3600)  # Cache for 1 hour, shared across sessions
+def load_address_data(_conn, silver_bucket: str) -> list[tuple[str, str]]:
+    """
+    Load parcel addresses for search functionality.
+
+    This data is cached and shared across all user sessions for memory efficiency.
+    The underscore prefix on _conn tells Streamlit not to hash the connection object.
+
+    Args:
+        _conn: DuckDB connection (not hashed by Streamlit)
+        silver_bucket: GCS bucket path for silver layer data
+
+    Returns:
+        List of (full_address, parcel_id) tuples
+    """
+    query = f"""
+    SELECT full_address, parcel_id
+    FROM read_parquet('{silver_bucket}/fact_parcels.parquet')
+    WHERE full_address IS NOT NULL
+    ORDER BY full_address
+    """
+    return _conn.execute(query).fetchall()
+
+
 def get_connection():
     """
-    Initialize DuckDB connection if not in session state, then return it.
+    Get connection and bucket paths.
 
     Returns:
         tuple: (conn, silver_bucket, gold_bucket)
     """
-    if "conn" not in st.session_state:
-        conn = duckdb.connect()
-        conn.execute("""
-            INSTALL httpfs;
-            LOAD httpfs;
-            INSTALL spatial;
-            LOAD spatial;
-        """)
-        conn.execute(f"""
-            CREATE SECRET gcs_secret (
-                TYPE gcs,
-                KEY_ID '{st.secrets["gcs"]["key_id"]}',
-                SECRET '{st.secrets["gcs"]["secret"]}'
-            );
-        """)
-        st.session_state.conn = conn
-        st.session_state.SILVER_BUCKET = st.secrets["gcs"]["silver_bucket"]
-        st.session_state.GOLD_BUCKET = st.secrets["gcs"]["gold_bucket"]
+    conn = get_duckdb_connection()
+    silver_bucket = st.secrets["gcs"]["silver_bucket"]
+    gold_bucket = st.secrets["gcs"]["gold_bucket"]
 
-        # Preload parcel addresses into memory for fast searching
-        try:
-            with st.spinner("Loading parcel data..."):
-                conn.execute(f"""
-                    CREATE TEMP TABLE parcel_addresses AS
-                    SELECT parcel_id, full_address
-                    FROM read_parquet('{st.secrets["gcs"]["silver_bucket"]}/fact_parcels.parquet')
-                    WHERE full_address IS NOT NULL
-                """)
-                conn.execute("CREATE INDEX idx_parcel_address ON parcel_addresses(full_address)")
-            st.session_state.address_search_enabled = True
-        except Exception as e:
-            st.warning(f"Could not preload addresses: {e}. Search will use slower mode.")
-            st.session_state.address_search_enabled = False
-
-    return (
-        st.session_state.conn,
-        st.session_state.SILVER_BUCKET,
-        st.session_state.GOLD_BUCKET,
-    )
+    return conn, silver_bucket, gold_bucket

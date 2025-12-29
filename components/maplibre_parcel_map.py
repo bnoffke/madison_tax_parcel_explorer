@@ -39,6 +39,14 @@ export default function(component) {
     console.log('Component function called');
     console.log('Data received, features:', data.geojson ? data.geojson.features.length : 'none');
 
+    // Extract overlay config
+    const overlayConfig = data.overlay || {
+        display_name_field: 'address',
+        overlay_type: 'parcels'
+    };
+    const displayField = overlayConfig.display_name_field;
+    const overlayType = overlayConfig.overlay_type;
+
     // Selection state
     let selectedFeatures = [];
     const MAX_SELECTIONS = 2;
@@ -163,7 +171,7 @@ export default function(component) {
 
         listDiv.innerHTML = selectedFeatures.map((f, idx) => `
             <div class="selection-item">
-                <strong>${idx + 1}.</strong> ${f.address}
+                <strong>${idx + 1}.</strong> ${f.label}
                 <span class="parcel-id">${f.id}</span>
             </div>
         `).join('');
@@ -253,15 +261,22 @@ export default function(component) {
             if (!e.features || e.features.length === 0) return;
 
             const props = e.features[0].properties;
+            const labelValue = props[displayField] || 'N/A';
+
+            // Build city street metric line (only for aggregated overlays)
+            const cityStreetLine = (overlayType !== 'parcels' && props.taxes_per_city_street_sqft > 0)
+                ? `<b>Taxes/City Street sqft:</b> $${props.taxes_per_city_street_sqft.toFixed(2)}<br/>`
+                : '';
 
             const html = `
-                <b>${props.address}</b><br/>
+                <b>${labelValue}</b><br/>
                 <b>Assessed Value:</b> ${props.display_total_value}<br/>
                 <b>Land Value:</b> ${props.display_land_value}<br/>
                 <b>Lot Size:</b> ${props.display_lot_size}<br/>
                 <b>Net Taxes:</b> ${props.display_net_taxes}<br/>
                 <hr style="margin: 5px 0; border: none; border-top: 1px solid rgba(255,255,255,0.3);"/>
                 <b>Net Taxes/sqft:</b> $${props.net_taxes_per_sqft.toFixed(2)}<br/>
+                ${cityStreetLine}
                 <b>Land Value/sqft:</b> $${props.land_value_per_sqft.toFixed(2)}<br/>
                 <b>Alignment Index:</b> ${props.alignment_index.toFixed(2)}
             `;
@@ -282,10 +297,11 @@ export default function(component) {
             const clickedFeature = e.features[0];
             const featureId = clickedFeature.id;
             const props = clickedFeature.properties;
+            const labelValue = props[displayField] || 'N/A';
 
             // Check if already selected
             const existingIndex = selectedFeatures.findIndex(
-                f => f.id === props.site_parcel_id
+                f => f.id === props.feature_id
             );
 
             if (existingIndex >= 0) {
@@ -296,6 +312,15 @@ export default function(component) {
                     { selected: false }
                 );
             } else {
+                // Validate overlay type before adding new selection
+                if (selectedFeatures.length > 0) {
+                    const firstOverlayType = selectedFeatures[0].overlay_type;
+                    if (props.overlay_type !== firstOverlayType) {
+                        console.warn('Cannot compare features from different overlay types');
+                        return;
+                    }
+                }
+
                 // Select
                 if (selectedFeatures.length >= MAX_SELECTIONS) {
                     // Remove oldest selection (FIFO)
@@ -303,7 +328,7 @@ export default function(component) {
 
                     // Find the numeric ID for the old feature
                     const oldFeature = data.geojson.features.find(
-                        f => f.properties.site_parcel_id === oldestFeature.id
+                        f => f.properties.feature_id === oldestFeature.id
                     );
                     if (oldFeature) {
                         map.setFeatureState(
@@ -315,8 +340,9 @@ export default function(component) {
 
                 // Add new selection
                 selectedFeatures.push({
-                    id: props.site_parcel_id,
-                    address: props.address,
+                    id: props.feature_id,
+                    label: labelValue,
+                    overlay_type: props.overlay_type,
                     properties: {
                         total_value: props.total_value,
                         land_value: props.land_value,
@@ -384,14 +410,15 @@ polygon_map = st.components.v2.component(
 )
 
 
-def render_maplibre_map(geojson_data: dict, center: list, zoom: int):
+def render_maplibre_map(geojson_data: dict, center: list, zoom: int, overlay_config: dict):
     """
     Render MapLibre map component with parcel selection.
 
     Args:
-        geojson_data: GeoJSON FeatureCollection with parcels
+        geojson_data: GeoJSON FeatureCollection
         center: [lat, lon] for map center
         zoom: Initial zoom level
+        overlay_config: Dict with display_name_field and overlay_type
 
     Returns:
         dict: Component value with selected_features
@@ -400,7 +427,8 @@ def render_maplibre_map(geojson_data: dict, center: list, zoom: int):
         data={
             "geojson": geojson_data,
             "center": {"lat": center[0], "lon": center[1]},
-            "zoom": zoom
+            "zoom": zoom,
+            "overlay": overlay_config
         },
         on_selected_features_change=lambda: None  # Required for v2 state capture
     )
