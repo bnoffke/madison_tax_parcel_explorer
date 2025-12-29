@@ -308,13 +308,21 @@ def build_comparison_dataframe(parcels: list, overlay_type: str) -> pd.DataFrame
             st.warning("⚠️ Cannot compare features from different overlay types. Please select features of the same type.")
             return pd.DataFrame()
 
+    # Filter metrics based on overlay type
+    if overlay_type == "parcels":
+        # Exclude city street metric for parcels
+        metrics_to_show = [m for m in COMPARISON_METRICS if m["key"] != "taxes_per_city_street_sqft"]
+    else:
+        # Show all metrics for aggregated overlays
+        metrics_to_show = COMPARISON_METRICS
+
     # Build data dictionary
-    data = {"Metric": [m["label"] for m in COMPARISON_METRICS]}
+    data = {"Metric": [m["label"] for m in metrics_to_show]}
 
     if num_parcels >= 1:
         # Feature 1 column
         feature1_values = []
-        for metric in COMPARISON_METRICS:
+        for metric in metrics_to_show:
             value = parcels[0]['properties'].get(metric['key'], None)
             formatted = format_metric_value(value, metric)
             feature1_values.append(formatted)
@@ -327,7 +335,7 @@ def build_comparison_dataframe(parcels: list, overlay_type: str) -> pd.DataFrame
     if num_parcels == 2:
         # Feature 2 column
         feature2_values = []
-        for metric in COMPARISON_METRICS:
+        for metric in metrics_to_show:
             value = parcels[1]['properties'].get(metric['key'], None)
             formatted = format_metric_value(value, metric)
             feature2_values.append(formatted)
@@ -338,7 +346,7 @@ def build_comparison_dataframe(parcels: list, overlay_type: str) -> pd.DataFrame
 
         # Difference column
         diff_values = []
-        for metric in COMPARISON_METRICS:
+        for metric in metrics_to_show:
             val1 = parcels[0]['properties'].get(metric['key'], None)
             val2 = parcels[1]['properties'].get(metric['key'], None)
             delta = calculate_metric_delta(val1, val2, metric)

@@ -349,6 +349,7 @@ export default function(component) {
                         lot_size: props.lot_size,
                         net_taxes: props.net_taxes,
                         net_taxes_per_sqft: props.net_taxes_per_sqft,
+                        taxes_per_city_street_sqft: props.taxes_per_city_street_sqft || 0,
                         land_value_per_sqft: props.land_value_per_sqft,
                         alignment_index: props.alignment_index
                     }
