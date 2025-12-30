@@ -263,6 +263,14 @@ export default function(component) {
             const props = e.features[0].properties;
             const labelValue = props[displayField] || 'N/A';
 
+            // Build property classification lines (only for parcels)
+            const propertyClassLine = (overlayType === 'parcels' && props.property_class)
+                ? `<b>Property Class:</b> ${props.property_class}<br/>`
+                : '';
+            const propertyUseLine = (overlayType === 'parcels' && props.property_use)
+                ? `<b>Property Use:</b> ${props.property_use}<br/>`
+                : '';
+
             // Build city street metric line (only for aggregated overlays)
             const cityStreetLine = (overlayType !== 'parcels' && props.taxes_per_city_street_sqft > 0)
                 ? `<b>Taxes/City Street sqft:</b> $${props.taxes_per_city_street_sqft.toFixed(2)}<br/>`
@@ -270,6 +278,8 @@ export default function(component) {
 
             const html = `
                 <b>${labelValue}</b><br/>
+                ${propertyClassLine}
+                ${propertyUseLine}
                 <b>Assessed Value:</b> ${props.display_total_value}<br/>
                 <b>Land Value:</b> ${props.display_land_value}<br/>
                 <b>Lot Size:</b> ${props.display_lot_size}<br/>

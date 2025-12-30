@@ -117,6 +117,10 @@ def load_map_data(_conn, gold_bucket: str, overlay_type: str) -> pd.DataFrame:
         select_clause = f"""
             {id_field},
             {label_field},
+            area_plan_name,
+            alder_district_name,
+            property_class,
+            property_use,
         """
         # Parcels: use current_ prefix columns
         value_columns = """
@@ -180,6 +184,35 @@ def load_map_data(_conn, gold_bucket: str, overlay_type: str) -> pd.DataFrame:
     except Exception as e:
         st.error(f"Error loading map data: {str(e)}")
         return pd.DataFrame()
+
+
+@st.cache_data(ttl=600)
+def load_parcel_filter_options(_conn, gold_bucket: str):
+    """Load distinct combinations with count-based filtering for property_use/property_class."""
+    # Get full combinations of all 4 dimensions for filterable values only
+    query = f"""
+    WITH filterable_props AS (
+        SELECT DISTINCT property_class, property_use
+        FROM read_parquet('{gold_bucket}/fact_sites.parquet')
+        WHERE property_class IS NOT NULL
+          AND property_use IS NOT NULL
+        GROUP BY ALL
+        HAVING COUNT(*) >= 50
+    )
+    SELECT DISTINCT
+        s.area_plan_name,
+        s.alder_district_name,
+        s.property_class,
+        s.property_use
+    FROM read_parquet('{gold_bucket}/fact_sites.parquet') s
+    INNER JOIN filterable_props fp
+        ON s.property_class = fp.property_class
+        AND s.property_use = fp.property_use
+    WHERE s.area_plan_name IS NOT NULL
+      AND s.alder_district_name IS NOT NULL
+    ORDER BY s.area_plan_name, s.alder_district_name, s.property_use
+    """
+    return _conn.execute(query).df()
 
 
 def calculate_colors(values: np.ndarray) -> tuple[list, float, float]:
@@ -362,6 +395,36 @@ def build_comparison_dataframe(parcels: list, overlay_type: str) -> pd.DataFrame
     return df
 
 
+def filter_dataframe(df: pd.DataFrame, overlay_type: str, area_plans: list, alder_districts: list,
+                     property_class: str, property_use: str) -> pd.DataFrame:
+    """
+    Filter DataFrame in-memory based on selected filter values.
+    Only applies to parcels overlay.
+    """
+    if overlay_type != "parcels":
+        return df
+
+    # Only filter if at least one filter has selections
+    if not any([area_plans, alder_districts, property_class, property_use]):
+        return df
+
+    filtered_df = df.copy()
+
+    if area_plans:
+        filtered_df = filtered_df[filtered_df['area_plan_name'].isin(area_plans)]
+
+    if alder_districts:
+        filtered_df = filtered_df[filtered_df['alder_district_name'].isin(alder_districts)]
+
+    if property_class:
+        filtered_df = filtered_df[filtered_df['property_class'] == property_class]
+
+    if property_use:
+        filtered_df = filtered_df[filtered_df['property_use'] == property_use]
+
+    return filtered_df
+
+
 def build_geojson_maplibre(df: pd.DataFrame, metric: str, overlay_type: str) -> tuple[dict, float, float]:
     """Build GeoJSON optimized for MapLibre with feature IDs and color properties.
 
@@ -412,6 +475,10 @@ def build_geojson_maplibre(df: pd.DataFrame, metric: str, overlay_type: str) -> 
                 "display_land_value": f"${row['current_land_value']:,.0f}" if pd.notna(row['current_land_value']) else "N/A",
                 "display_lot_size": f"{row['lot_size']:,.0f} sq ft" if pd.notna(row['lot_size']) else "N/A",
                 "display_net_taxes": f"${row['net_taxes']:,.0f}" if pd.notna(row['net_taxes']) else "N/A",
+
+                # Property classification (for parcels only)
+                "property_class": row.get('property_class', 'N/A') if overlay_type == "parcels" else None,
+                "property_use": row.get('property_use', 'N/A') if overlay_type == "parcels" else None,
 
                 # Raw values (numbers for comparison)
                 "total_value": float(row['current_total_value']) if pd.notna(row['current_total_value']) else 0,
@@ -464,13 +531,52 @@ def build_geojson(df: pd.DataFrame, metric: str) -> dict:
     return {"type": "FeatureCollection", "features": features}, p2, p98
 
 
+def get_filtered_options(df_combinations, selected_areas, selected_districts,
+                        selected_class, selected_use):
+    """
+    Filter options based on current selections across all 4 dimensions.
+    Returns (available_areas, available_districts, available_classes, available_uses)
+    """
+    filtered = df_combinations.copy()
+
+    # Apply each filter if selections exist
+    if selected_areas:
+        filtered = filtered[filtered['area_plan_name'].isin(selected_areas)]
+    if selected_districts:
+        filtered = filtered[filtered['alder_district_name'].isin(selected_districts)]
+    if selected_class:
+        filtered = filtered[filtered['property_class'] == selected_class]
+    if selected_use:
+        filtered = filtered[filtered['property_use'] == selected_use]
+
+    # Extract unique values for each dimension
+    available_areas = sorted(filtered['area_plan_name'].unique().tolist())
+    available_districts = sorted(filtered['alder_district_name'].unique().tolist())
+    available_classes = sorted(filtered['property_class'].unique().tolist())
+    available_uses = sorted(filtered['property_use'].unique().tolist())
+
+    return available_areas, available_districts, available_classes, available_uses
+
+
 # Initialize session state for overlay type
 if 'selected_overlay_type' not in st.session_state:
     st.session_state.selected_overlay_type = DEFAULT_OVERLAY
+if 'selected_area_plans' not in st.session_state:
+    st.session_state.selected_area_plans = []
+if 'selected_alder_districts' not in st.session_state:
+    st.session_state.selected_alder_districts = []
+if 'selected_property_classes' not in st.session_state:
+    st.session_state.selected_property_classes = None
+if 'selected_property_uses' not in st.session_state:
+    st.session_state.selected_property_uses = None
 
 # Callback to clear selections when overlay changes
 def on_overlay_change():
     st.session_state.map_selected_parcels = []
+    st.session_state.selected_area_plans = []
+    st.session_state.selected_alder_districts = []
+    st.session_state.selected_property_classes = None
+    st.session_state.selected_property_uses = None
 
 # Sidebar
 with st.sidebar:
@@ -496,6 +602,74 @@ with st.sidebar:
     )
     selected_metric = METRICS[selected_metric_label]
 
+    # Parcel-specific filters (only shown when parcels overlay is selected)
+    if overlay_type == "parcels":
+        # Load filter options
+        df_filter_options = load_parcel_filter_options(conn, GOLD_BUCKET)
+
+        # Get currently available options based on selections
+        available_areas, available_districts, available_classes, available_uses = get_filtered_options(
+            df_filter_options,
+            st.session_state.selected_area_plans,
+            st.session_state.selected_alder_districts,
+            st.session_state.selected_property_classes,  # Single value (or None)
+            st.session_state.selected_property_uses      # Single value (or None)
+        )
+
+        # Area plan filter
+        selected_area_plans = st.multiselect(
+            "Area Plans",
+            options=available_areas,
+            default=st.session_state.selected_area_plans,
+            key="area_plan_filter"
+        )
+        st.session_state.selected_area_plans = selected_area_plans
+
+        # Alder district filter
+        selected_alder_districts = st.multiselect(
+            "Alder Districts",
+            options=available_districts,
+            default=st.session_state.selected_alder_districts,
+            key="alder_district_filter"
+        )
+        st.session_state.selected_alder_districts = selected_alder_districts
+
+        # Property class filter
+        class_options = ["All"] + available_classes
+        class_index = 0
+        if st.session_state.selected_property_classes and st.session_state.selected_property_classes in available_classes:
+            class_index = class_options.index(st.session_state.selected_property_classes)
+
+        selected_property_class_raw = st.selectbox(
+            "Property Class",
+            options=class_options,
+            index=class_index,
+            key="property_class_filter"
+        )
+        selected_property_class = selected_property_class_raw if selected_property_class_raw != "All" else None
+        st.session_state.selected_property_classes = selected_property_class
+
+        # Property use filter
+        use_options = ["All"] + available_uses
+        use_index = 0
+        if st.session_state.selected_property_uses and st.session_state.selected_property_uses in available_uses:
+            use_index = use_options.index(st.session_state.selected_property_uses)
+
+        selected_property_use_raw = st.selectbox(
+            "Property Use",
+            options=use_options,
+            index=use_index,
+            key="property_use_filter"
+        )
+        selected_property_use = selected_property_use_raw if selected_property_use_raw != "All" else None
+        st.session_state.selected_property_uses = selected_property_use
+    else:
+        # Clear filters when not on parcels overlay
+        selected_area_plans = []
+        selected_alder_districts = []
+        selected_property_class = None
+        selected_property_use = None
+
     # Legend
     st.markdown("### Legend")
     st.markdown(f"**{selected_metric_label}**")
@@ -506,8 +680,13 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-# Load data with overlay type
+# Load data (cached by overlay type only)
 df = load_map_data(conn, GOLD_BUCKET, overlay_type)
+
+# Apply in-memory filtering for parcels
+if overlay_type == "parcels":
+    df = filter_dataframe(df, overlay_type, selected_area_plans, selected_alder_districts,
+                         selected_property_class, selected_property_use)
 
 if not df.empty:
     geojson_data, p2, p98 = build_geojson_maplibre(df, selected_metric, overlay_type)
