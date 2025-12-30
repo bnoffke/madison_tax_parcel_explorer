@@ -5,6 +5,7 @@ import numpy as np
 
 from utils.db import get_connection
 from utils.formatters import format_currency, format_number
+from components.glossary_dialog import render_glossary_button
 
 # Access shared state (initializes if needed)
 conn, _, GOLD_BUCKET = get_connection()
@@ -527,6 +528,10 @@ else:
         feature_count = len(geojson_data['features'])
         st.caption(f"Showing {feature_count:,} {overlay_label.lower()}")
         st.info("Map may take a minute to load.")
+
+        # Glossary
+        st.markdown("---")
+        render_glossary_button()
 
     # Import map component
     from components.maplibre_parcel_map import render_maplibre_map
