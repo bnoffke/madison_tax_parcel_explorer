@@ -29,6 +29,45 @@ COMPONENT_CSS = """
 .maplibregl-popup-close-button {
     color: white;
 }
+/* Control Panel Styles - Dark Mode */
+#map-control-panel .mode-btn:hover:not(.active) {
+    background: #555 !important;
+}
+#map-control-panel .mode-btn.active {
+    background: #4a90d9 !important;
+    color: white !important;
+}
+#map-control-panel #confirm-group-btn:not(:disabled):hover,
+#map-control-panel #individual-compare-btn:not(:disabled):hover {
+    background: #357abd !important;
+}
+#map-control-panel #confirm-group-btn:disabled,
+#map-control-panel #individual-compare-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+#map-control-panel #reset-btn:hover,
+#map-control-panel #individual-clear-btn:hover {
+    background: #444 !important;
+    border-color: #666 !important;
+}
+#map-control-panel #compare-groups-btn:hover {
+    background: #218838 !important;
+}
+#map-control-panel .selection-item {
+    padding: 4px 0;
+    font-size: 12px;
+    color: #ccc;
+    border-bottom: 1px solid #444;
+}
+#map-control-panel .selection-item:last-child {
+    border-bottom: none;
+}
+#map-control-panel .parcel-id {
+    color: #888;
+    font-size: 10px;
+    display: block;
+}
 """
 
 # JavaScript component logic
@@ -46,6 +85,8 @@ export default function(component) {
     };
     const displayField = overlayConfig.display_name_field;
     const overlayType = overlayConfig.overlay_type;
+    const overlayLabelSingular = overlayConfig.label_singular || 'Parcel';
+    const overlayLabelPlural = overlayConfig.label_plural || 'Parcels';
 
     // Selection state
     let selectedFeatures = [];
@@ -53,6 +94,25 @@ export default function(component) {
     let map = null;
     let mapContainer = null;  // Outer scope so initMap() can access it
     let loadingOverlay = null;  // Outer scope so we can remove it after map loads
+
+    // Group Comparison Mode state
+    let selectionMode = 'individual';  // 'individual' | 'group'
+    let groupModeState = 'IDLE';  // 'IDLE' | 'SELECTING_G1' | 'SELECTING_G2' | 'COMPLETE'
+    let group1Features = [];
+    let group2Features = [];
+    let confirmedGroup1 = null;  // { features: [...] } or null
+    let confirmedGroup2 = null;
+    let featureGroupMap = new Map();  // featureId -> 'group1' | 'group2'
+
+    // Color constants for selection outlines
+    const SELECTION_COLORS = {
+        individual: '#000000',   // Black
+        group1: '#00FFFF',       // Cyan
+        group2: '#39FF14'        // Lime Green
+    };
+
+    // DOM element references (avoid getElementById issues)
+    let controlPanel = null;
 
     // Create HTML structure in JavaScript
     function createElementsAndInit() {
@@ -63,15 +123,72 @@ export default function(component) {
         mapContainer.id = 'map-container';
         mapContainer.className = 'map-container';  // Height controlled by CSS!
 
-        // Create selection badge
-        const badge = document.createElement('div');
-        badge.id = 'selection-badge';
-        badge.style.cssText = 'position: absolute; top: 10px; right: 10px; background: rgba(255,255,255,0.95); padding: 12px 16px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.2); font-family: system-ui; font-size: 14px; z-index: 1000; min-width: 200px; display: none;';
-        badge.innerHTML = `
-            <div style="font-weight: 600; color: #333; margin-bottom: 8px;">
-                Selected Parcels (<span id="selection-count">0</span>/2)
+        // Create unified control panel
+        controlPanel = document.createElement('div');
+        controlPanel.id = 'map-control-panel';
+        controlPanel.style.cssText = 'position: absolute; bottom: 30px; left: 10px; background: rgba(30,30,35,0.95); padding: 12px 16px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.4); font-family: system-ui; font-size: 14px; z-index: 1000; min-width: 240px; max-width: 320px; color: #f0f0f0;';
+        controlPanel.innerHTML = `
+            <!-- Mode Toggle Section -->
+            <div class="mode-toggle-section" style="margin-bottom: 12px; border-bottom: 1px solid #444; padding-bottom: 12px;">
+                <label style="font-weight: 600; color: #f0f0f0; display: block; margin-bottom: 6px; font-size: 12px;">Selection Mode</label>
+                <div class="segmented-control" style="display: flex; background: #444; border-radius: 6px; overflow: hidden;">
+                    <button class="mode-btn active" data-mode="individual" style="flex: 1; padding: 8px 12px; border: none; background: #4a90d9; color: white; cursor: pointer; font-size: 13px; transition: all 0.2s;">Individual</button>
+                    <button class="mode-btn" data-mode="group" style="flex: 1; padding: 8px 12px; border: none; background: transparent; color: #ccc; cursor: pointer; font-size: 13px; transition: all 0.2s;">Group</button>
+                </div>
             </div>
-            <div id="selection-list"></div>
+
+            <!-- Individual Mode Panel -->
+            <div id="individual-mode-panel" style="display: block;">
+                <div style="font-weight: 600; color: #f0f0f0; margin-bottom: 8px;">
+                    Selected ${overlayLabelPlural} (<span id="selection-count">0</span>/2)
+                </div>
+                <div id="selection-list"></div>
+                <div id="individual-empty-state" style="color: #888; font-size: 12px;">Click ${overlayLabelPlural.toLowerCase()} on the map to select</div>
+
+                <!-- Action Buttons for Individual Mode -->
+                <div id="individual-action-buttons" style="margin-top: 12px; display: none; gap: 8px;">
+                    <button id="individual-compare-btn" style="flex: 1; padding: 10px; border: none; border-radius: 6px; background: #28a745; color: white; cursor: pointer; font-weight: 600;">🔍 Compare</button>
+                    <button id="individual-clear-btn" style="padding: 10px 16px; border: 1px solid #555; border-radius: 6px; background: #333; color: #ccc; cursor: pointer;">Clear</button>
+                </div>
+            </div>
+
+            <!-- Group Mode Panel -->
+            <div id="group-mode-panel" style="display: none;">
+                <!-- State Indicator -->
+                <div id="group-state-indicator" style="font-weight: 600; color: #f0f0f0; margin-bottom: 8px;">
+                    Click ${overlayLabelPlural.toLowerCase()} to start building Group 1
+                </div>
+
+                <!-- Active Group Selection Area -->
+                <div id="active-group-section">
+                    <div id="active-group-label" style="font-size: 12px; color: #00FFFF; margin-bottom: 4px; font-weight: 600;">Building Group 1:</div>
+                    <div id="active-group-count" style="font-size: 18px; font-weight: bold; color: #00FFFF;">0 ${overlayLabelPlural.toLowerCase()}</div>
+                    <div id="active-group-list" style="max-height: 100px; overflow-y: auto; margin: 8px 0; font-size: 12px;"></div>
+                </div>
+
+                <!-- Confirmed Groups Summary -->
+                <div id="confirmed-groups-summary" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #444; display: none;">
+                    <div id="confirmed-g1-summary" style="display: none; margin-bottom: 8px;">
+                        <span style="color: #00FFFF; font-weight: 600;">● Group 1:</span>
+                        <span id="confirmed-g1-count">0 ${overlayLabelPlural.toLowerCase()}</span>
+                    </div>
+                    <div id="confirmed-g2-summary" style="display: none; margin-bottom: 8px;">
+                        <span style="color: #39FF14; font-weight: 600;">● Group 2:</span>
+                        <span id="confirmed-g2-count">0 ${overlayLabelPlural.toLowerCase()}</span>
+                    </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div id="group-action-buttons" style="margin-top: 12px; display: flex; gap: 8px;">
+                    <button id="confirm-group-btn" disabled style="flex: 1; padding: 10px; border: none; border-radius: 6px; background: #4a90d9; color: white; cursor: pointer; font-weight: 600; opacity: 0.5;">Confirm Group 1</button>
+                    <button id="reset-btn" style="padding: 10px 16px; border: 1px solid #555; border-radius: 6px; background: #333; color: #ccc; cursor: pointer;">Reset</button>
+                </div>
+
+                <!-- Compare Groups Button (shown only in COMPLETE state) -->
+                <button id="compare-groups-btn" style="display: none; width: 100%; margin-top: 12px; padding: 12px; border: none; border-radius: 6px; background: #28a745; color: white; cursor: pointer; font-weight: 600; font-size: 14px;">
+                    🔍 Compare Groups
+                </button>
+            </div>
         `;
 
         // Create loading overlay
@@ -81,11 +198,11 @@ export default function(component) {
         loadingOverlay.innerHTML = `
             <div style="text-align: center;">
                 <div style="font-size: 18px; font-weight: bold; color: #333; margin-bottom: 10px;">Loading map...</div>
-                <div style="font-size: 14px; color: #666;">Rendering parcels</div>
+                <div style="font-size: 14px; color: #666;">Rendering ${overlayLabelPlural.toLowerCase()}</div>
             </div>
         `;
 
-        mapContainer.appendChild(badge);
+        mapContainer.appendChild(controlPanel);
         mapContainer.appendChild(loadingOverlay);
 
         parentElement.appendChild(mapContainer);  // v2: Use parentElement!
@@ -153,33 +270,498 @@ export default function(component) {
         maxWidth: '300px'
     });
 
-    // Update selection badge
-    function updateSelectionBadge() {
-        const badge = document.getElementById('selection-badge');
-        const countSpan = document.getElementById('selection-count');
-        const listDiv = document.getElementById('selection-list');
-
-        if (!badge || !countSpan || !listDiv) return;
-
-        if (selectedFeatures.length === 0) {
-            badge.style.display = 'none';
-            return;
-        }
-
-        badge.style.display = 'block';
-        countSpan.textContent = selectedFeatures.length;
-
-        listDiv.innerHTML = selectedFeatures.map((f, idx) => `
-            <div class="selection-item">
-                <strong>${idx + 1}.</strong> ${f.label}
-                <span class="parcel-id">${f.id}</span>
-            </div>
-        `).join('');
+    // Helper to get element from control panel (avoid getElementById issues)
+    function getElement(selector) {
+        return controlPanel ? controlPanel.querySelector(selector) : null;
     }
 
-    // Sync selection to Python (v2: use setStateValue for persistent state)
+    // Update individual mode badge
+    function updateIndividualBadge() {
+        const countSpan = getElement('#selection-count');
+        const listDiv = getElement('#selection-list');
+        const emptyState = getElement('#individual-empty-state');
+
+        if (!countSpan || !listDiv) return;
+
+        countSpan.textContent = selectedFeatures.length;
+
+        if (selectedFeatures.length === 0) {
+            listDiv.innerHTML = '';
+            if (emptyState) emptyState.style.display = 'block';
+        } else {
+            if (emptyState) emptyState.style.display = 'none';
+            listDiv.innerHTML = selectedFeatures.map((f, idx) => `
+                <div class="selection-item">
+                    <strong>${idx + 1}.</strong> ${f.label}
+                    <span class="parcel-id">${f.id}</span>
+                </div>
+            `).join('');
+        }
+    }
+
+    // Update group mode UI
+    function updateGroupModeUI() {
+        const stateIndicator = getElement('#group-state-indicator');
+        const activeGroupLabel = getElement('#active-group-label');
+        const activeGroupCount = getElement('#active-group-count');
+        const activeGroupList = getElement('#active-group-list');
+        const activeSection = getElement('#active-group-section');
+        const confirmedSummary = getElement('#confirmed-groups-summary');
+        const confirmBtn = getElement('#confirm-group-btn');
+        const compareBtn = getElement('#compare-groups-btn');
+        const g1Summary = getElement('#confirmed-g1-summary');
+        const g1Count = getElement('#confirmed-g1-count');
+        const g2Summary = getElement('#confirmed-g2-summary');
+        const g2Count = getElement('#confirmed-g2-count');
+
+        if (!stateIndicator) return;
+
+        // State indicator messages
+        const stateMessages = {
+            'IDLE': 'Click ' + overlayLabelPlural.toLowerCase() + ' to start building Group 1',
+            'SELECTING_G1': 'Building Group 1',
+            'SELECTING_G2': 'Building Group 2',
+            'COMPLETE': 'Both groups ready!'
+        };
+        stateIndicator.textContent = stateMessages[groupModeState] || '';
+
+        // Update active group display based on state
+        if (groupModeState === 'SELECTING_G1' || groupModeState === 'IDLE') {
+            activeGroupLabel.textContent = 'Building Group 1:';
+            activeGroupLabel.style.color = SELECTION_COLORS.group1;
+            activeGroupCount.textContent = group1Features.length + ' ' + overlayLabelPlural.toLowerCase();
+            activeGroupCount.style.color = SELECTION_COLORS.group1;
+            activeGroupList.innerHTML = group1Features.map(f =>
+                '<div class="selection-item">' + f.label + '</div>'
+            ).join('');
+            activeSection.style.display = 'block';
+        } else if (groupModeState === 'SELECTING_G2') {
+            activeGroupLabel.textContent = 'Building Group 2:';
+            activeGroupLabel.style.color = SELECTION_COLORS.group2;
+            activeGroupCount.textContent = group2Features.length + ' ' + overlayLabelPlural.toLowerCase();
+            activeGroupCount.style.color = SELECTION_COLORS.group2;
+            activeGroupList.innerHTML = group2Features.map(f =>
+                '<div class="selection-item">' + f.label + '</div>'
+            ).join('');
+            activeSection.style.display = 'block';
+        } else if (groupModeState === 'COMPLETE') {
+            activeSection.style.display = 'none';
+        }
+
+        // Update confirmed groups summary
+        if (confirmedGroup1 || confirmedGroup2) {
+            confirmedSummary.style.display = 'block';
+
+            if (confirmedGroup1) {
+                g1Summary.style.display = 'block';
+                g1Count.textContent = confirmedGroup1.features.length + ' ' + overlayLabelPlural.toLowerCase();
+            } else {
+                g1Summary.style.display = 'none';
+            }
+
+            if (confirmedGroup2) {
+                g2Summary.style.display = 'block';
+                g2Count.textContent = confirmedGroup2.features.length + ' ' + overlayLabelPlural.toLowerCase();
+            } else {
+                g2Summary.style.display = 'none';
+            }
+        } else {
+            confirmedSummary.style.display = 'none';
+        }
+
+        // Update button visibility and state
+        if (groupModeState === 'COMPLETE') {
+            confirmBtn.style.display = 'none';
+            compareBtn.style.display = 'block';
+        } else {
+            confirmBtn.style.display = 'block';
+            compareBtn.style.display = 'none';
+
+            // Update confirm button text and state
+            if (groupModeState === 'SELECTING_G1' || groupModeState === 'IDLE') {
+                confirmBtn.textContent = 'Confirm Group 1';
+                confirmBtn.disabled = group1Features.length === 0;
+                confirmBtn.style.opacity = group1Features.length === 0 ? '0.5' : '1';
+            } else if (groupModeState === 'SELECTING_G2') {
+                confirmBtn.textContent = 'Confirm Group 2';
+                confirmBtn.disabled = group2Features.length === 0;
+                confirmBtn.style.opacity = group2Features.length === 0 ? '0.5' : '1';
+            }
+        }
+    }
+
+    // Calculate aggregate values for a group
+    function calculateGroupAggregate(features) {
+        if (!features || features.length === 0) return null;
+
+        const aggregate = {
+            count: features.length,
+            total_value: 0,
+            land_value: 0,
+            lot_size: 0,
+            net_taxes: 0
+        };
+
+        features.forEach(f => {
+            aggregate.total_value += f.properties.total_value || 0;
+            aggregate.land_value += f.properties.land_value || 0;
+            aggregate.lot_size += f.properties.lot_size || 0;
+            aggregate.net_taxes += f.properties.net_taxes || 0;
+        });
+
+        // Calculate derived metrics
+        if (aggregate.lot_size > 0) {
+            aggregate.net_taxes_per_sqft = aggregate.net_taxes / aggregate.lot_size;
+            aggregate.land_value_per_sqft = aggregate.land_value / aggregate.lot_size;
+        } else {
+            aggregate.net_taxes_per_sqft = 0;
+            aggregate.land_value_per_sqft = 0;
+        }
+
+        // Alignment index: land-value weighted average (mathematically correct per formula)
+        const weightedAlignmentSum = features.reduce((sum, f) =>
+            sum + (f.properties.alignment_index || 0) * (f.properties.land_value || 0), 0);
+        aggregate.alignment_index = aggregate.land_value > 0
+            ? weightedAlignmentSum / aggregate.land_value
+            : 0;
+
+        return aggregate;
+    }
+
+    // Sync individual mode selection to Python
     function syncToPython() {
-        setStateValue('selected_features', selectedFeatures);
+        if (selectionMode === 'individual') {
+            setStateValue('selected_features', selectedFeatures);
+        }
+    }
+
+    // Sync group comparison to Python (only called on Compare click)
+    function syncGroupsToPython() {
+        const payload = {
+            comparison_mode: 'group',
+            group1: confirmedGroup1 ? {
+                features: confirmedGroup1.features,
+                aggregate: calculateGroupAggregate(confirmedGroup1.features)
+            } : null,
+            group2: confirmedGroup2 ? {
+                features: confirmedGroup2.features,
+                aggregate: calculateGroupAggregate(confirmedGroup2.features)
+            } : null
+        };
+        setStateValue('selected_features', payload);
+    }
+
+    // State machine transition
+    function transitionGroupState(action) {
+        switch (groupModeState) {
+            case 'IDLE':
+                if (action === 'START_SELECTING') {
+                    groupModeState = 'SELECTING_G1';
+                }
+                break;
+
+            case 'SELECTING_G1':
+                if (action === 'CONFIRM' && group1Features.length > 0) {
+                    confirmedGroup1 = { features: [...group1Features] };
+                    groupModeState = 'SELECTING_G2';
+                } else if (action === 'RESET') {
+                    resetGroupMode();
+                }
+                break;
+
+            case 'SELECTING_G2':
+                if (action === 'CONFIRM' && group2Features.length > 0) {
+                    confirmedGroup2 = { features: [...group2Features] };
+                    groupModeState = 'COMPLETE';
+                } else if (action === 'RESET') {
+                    resetGroupMode();
+                }
+                break;
+
+            case 'COMPLETE':
+                if (action === 'COMPARE') {
+                    syncGroupsToPython();  // Trigger Streamlit rerun
+                } else if (action === 'RESET') {
+                    resetGroupMode();
+                }
+                break;
+        }
+
+        updateGroupModeUI();
+    }
+
+    // Clear all group selections and visual states
+    function resetGroupMode() {
+        // Clear visual states for all group features
+        [...group1Features, ...group2Features].forEach(f => {
+            const feature = data.geojson.features.find(gf => gf.properties.feature_id === f.id);
+            if (feature) {
+                map.setFeatureState(
+                    { source: 'parcels', id: feature.id },
+                    { selected: false, groupMembership: null }
+                );
+            }
+        });
+
+        // Reset state
+        group1Features = [];
+        group2Features = [];
+        confirmedGroup1 = null;
+        confirmedGroup2 = null;
+        featureGroupMap.clear();
+        groupModeState = 'IDLE';
+
+        // Auto-transition to SELECTING_G1
+        if (selectionMode === 'group') {
+            transitionGroupState('START_SELECTING');
+        }
+    }
+
+    // Clear all selections (both modes)
+    function clearAllSelections() {
+        // Clear individual mode selections
+        selectedFeatures.forEach(f => {
+            const feature = data.geojson.features.find(gf => gf.properties.feature_id === f.id);
+            if (feature) {
+                map.setFeatureState(
+                    { source: 'parcels', id: feature.id },
+                    { selected: false, groupMembership: null }
+                );
+            }
+        });
+        selectedFeatures = [];
+
+        // Clear group mode selections
+        resetGroupMode();
+    }
+
+    // Switch between selection modes
+    function switchSelectionMode(newMode) {
+        if (newMode === selectionMode) return;
+
+        // Clear all selections when switching modes
+        clearAllSelections();
+
+        selectionMode = newMode;
+
+        // Update mode button styling (dark theme)
+        const modeBtns = controlPanel.querySelectorAll('.mode-btn');
+        modeBtns.forEach(btn => {
+            if (btn.dataset.mode === newMode) {
+                btn.classList.add('active');
+                btn.style.background = '#4a90d9';
+                btn.style.color = 'white';
+            } else {
+                btn.classList.remove('active');
+                btn.style.background = 'transparent';
+                btn.style.color = '#ccc';
+            }
+        });
+
+        // Toggle panel visibility
+        const individualPanel = getElement('#individual-mode-panel');
+        const groupPanel = getElement('#group-mode-panel');
+
+        if (newMode === 'individual') {
+            individualPanel.style.display = 'block';
+            groupPanel.style.display = 'none';
+            updateIndividualBadge();
+            updateIndividualButtons();
+            // NOTE: Do NOT sync on mode switch - wait for Compare button
+        } else {
+            individualPanel.style.display = 'none';
+            groupPanel.style.display = 'block';
+            // Start group selection
+            transitionGroupState('START_SELECTING');
+        }
+    }
+
+    // Build feature object from properties
+    function buildFeatureObject(props, labelValue) {
+        return {
+            id: props.feature_id,
+            label: labelValue,
+            overlay_type: props.overlay_type,
+            properties: {
+                total_value: props.total_value,
+                land_value: props.land_value,
+                lot_size: props.lot_size,
+                net_taxes: props.net_taxes,
+                net_taxes_per_sqft: props.net_taxes_per_sqft,
+                taxes_per_city_street_sqft: props.taxes_per_city_street_sqft || 0,
+                land_value_per_sqft: props.land_value_per_sqft,
+                alignment_index: props.alignment_index
+            }
+        };
+    }
+
+    // Validate overlay type consistency
+    function validateOverlayType(props) {
+        if (selectionMode === 'individual' && selectedFeatures.length > 0) {
+            if (props.overlay_type !== selectedFeatures[0].overlay_type) {
+                console.warn('Cannot compare features from different overlay types');
+                return false;
+            }
+        }
+        if (selectionMode === 'group') {
+            const existingType = group1Features[0]?.overlay_type || group2Features[0]?.overlay_type;
+            if (existingType && props.overlay_type !== existingType) {
+                console.warn('Cannot compare features from different overlay types');
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Update individual mode buttons visibility
+    function updateIndividualButtons() {
+        const buttonsDiv = getElement('#individual-action-buttons');
+        if (!buttonsDiv) return;
+
+        if (selectedFeatures.length > 0) {
+            buttonsDiv.style.display = 'flex';
+        } else {
+            buttonsDiv.style.display = 'none';
+        }
+    }
+
+    // Handle individual mode click
+    function handleIndividualClick(featureId, props, labelValue) {
+        const existingIndex = selectedFeatures.findIndex(f => f.id === props.feature_id);
+
+        if (existingIndex >= 0) {
+            // Deselect
+            selectedFeatures.splice(existingIndex, 1);
+            map.setFeatureState({ source: 'parcels', id: featureId }, { selected: false });
+        } else {
+            // Select with FIFO replacement
+            if (selectedFeatures.length >= MAX_SELECTIONS) {
+                const oldestFeature = selectedFeatures.shift();
+                const oldFeature = data.geojson.features.find(f => f.properties.feature_id === oldestFeature.id);
+                if (oldFeature) {
+                    map.setFeatureState({ source: 'parcels', id: oldFeature.id }, { selected: false });
+                }
+            }
+
+            selectedFeatures.push(buildFeatureObject(props, labelValue));
+            map.setFeatureState({ source: 'parcels', id: featureId }, { selected: true });
+        }
+
+        updateIndividualBadge();
+        updateIndividualButtons();
+        // NOTE: Do NOT sync immediately - wait for Compare button click
+    }
+
+    // Handle individual mode Compare button click
+    function handleIndividualCompare() {
+        syncToPython();
+    }
+
+    // Handle individual mode Clear button click
+    function handleIndividualClear() {
+        // Clear all individual mode selections
+        selectedFeatures.forEach(f => {
+            const feature = data.geojson.features.find(gf => gf.properties.feature_id === f.id);
+            if (feature) {
+                map.setFeatureState({ source: 'parcels', id: feature.id }, { selected: false });
+            }
+        });
+        selectedFeatures = [];
+        updateIndividualBadge();
+        updateIndividualButtons();
+    }
+
+    // Handle group mode click
+    function handleGroupClick(featureId, props, labelValue) {
+        // Determine which group is active based on state
+        const activeGroup = (groupModeState === 'SELECTING_G1' || groupModeState === 'IDLE')
+            ? 'group1'
+            : 'group2';
+
+        const activeArray = activeGroup === 'group1' ? group1Features : group2Features;
+        const existingIndex = activeArray.findIndex(f => f.id === props.feature_id);
+
+        // Check if feature is in the OTHER confirmed group (prevent double-assignment)
+        if (activeGroup === 'group2' && confirmedGroup1) {
+            const inGroup1 = confirmedGroup1.features.some(f => f.id === props.feature_id);
+            if (inGroup1) {
+                console.warn('Feature already in Group 1');
+                return;
+            }
+        }
+
+        if (existingIndex >= 0) {
+            // Remove from active group
+            activeArray.splice(existingIndex, 1);
+            featureGroupMap.delete(props.feature_id);
+            map.setFeatureState(
+                { source: 'parcels', id: featureId },
+                { selected: false, groupMembership: null }
+            );
+        } else {
+            // Add to active group (no limit in group mode)
+            activeArray.push(buildFeatureObject(props, labelValue));
+            featureGroupMap.set(props.feature_id, activeGroup);
+            map.setFeatureState(
+                { source: 'parcels', id: featureId },
+                { selected: true, groupMembership: activeGroup }
+            );
+        }
+
+        // Update UI (but do NOT sync to Python - that only happens on confirm)
+        updateGroupModeUI();
+    }
+
+    // Set up control panel event handlers
+    function setupControlPanelHandlers() {
+        // Mode toggle buttons
+        const modeBtns = controlPanel.querySelectorAll('.mode-btn');
+        modeBtns.forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const newMode = e.target.dataset.mode;
+                switchSelectionMode(newMode);
+            });
+        });
+
+        // Individual mode: Compare button
+        const individualCompareBtn = getElement('#individual-compare-btn');
+        if (individualCompareBtn) {
+            individualCompareBtn.addEventListener('click', () => {
+                handleIndividualCompare();
+            });
+        }
+
+        // Individual mode: Clear button
+        const individualClearBtn = getElement('#individual-clear-btn');
+        if (individualClearBtn) {
+            individualClearBtn.addEventListener('click', () => {
+                handleIndividualClear();
+            });
+        }
+
+        // Group mode: Confirm button
+        const confirmBtn = getElement('#confirm-group-btn');
+        if (confirmBtn) {
+            confirmBtn.addEventListener('click', () => {
+                transitionGroupState('CONFIRM');
+            });
+        }
+
+        // Group mode: Reset button
+        const resetBtn = getElement('#reset-btn');
+        if (resetBtn) {
+            resetBtn.addEventListener('click', () => {
+                transitionGroupState('RESET');
+            });
+        }
+
+        // Group mode: Compare button
+        const compareBtn = getElement('#compare-groups-btn');
+        if (compareBtn) {
+            compareBtn.addEventListener('click', () => {
+                transitionGroupState('COMPARE');
+            });
+        }
     }
 
     // Map load event
@@ -212,14 +794,27 @@ export default function(component) {
         });
         console.log('Fill layer added');
 
-        // Line layer for selection outline
+        // Line layer for selection outline (supports group colors)
         console.log('Adding selection outline layer...');
         map.addLayer({
             id: 'parcels-line-selected',
             type: 'line',
             source: 'parcels',
             paint: {
-                'line-color': '#000000',
+                'line-color': [
+                    'case',
+                    // Group 2 - Lime Green
+                    ['==', ['feature-state', 'groupMembership'], 'group2'],
+                    SELECTION_COLORS.group2,
+                    // Group 1 - Cyan
+                    ['==', ['feature-state', 'groupMembership'], 'group1'],
+                    SELECTION_COLORS.group1,
+                    // Individual mode / fallback - Black
+                    ['boolean', ['feature-state', 'selected'], false],
+                    SELECTION_COLORS.individual,
+                    // Default (not selected)
+                    'transparent'
+                ],
                 'line-width': [
                     'case',
                     ['boolean', ['feature-state', 'selected'], false],
@@ -299,7 +894,7 @@ export default function(component) {
         });
         console.log('Tooltip handlers attached');
 
-        // Click handler for selection
+        // Click handler for selection (unified dispatcher)
         console.log('Attaching click handler...');
         map.on('click', 'parcels-fill', (e) => {
             if (!e.features || e.features.length === 0) return;
@@ -309,71 +904,15 @@ export default function(component) {
             const props = clickedFeature.properties;
             const labelValue = props[displayField] || 'N/A';
 
-            // Check if already selected
-            const existingIndex = selectedFeatures.findIndex(
-                f => f.id === props.feature_id
-            );
+            // Validate overlay type consistency
+            if (!validateOverlayType(props)) return;
 
-            if (existingIndex >= 0) {
-                // Deselect
-                selectedFeatures.splice(existingIndex, 1);
-                map.setFeatureState(
-                    { source: 'parcels', id: featureId },
-                    { selected: false }
-                );
+            // Route to mode-specific handler
+            if (selectionMode === 'individual') {
+                handleIndividualClick(featureId, props, labelValue);
             } else {
-                // Validate overlay type before adding new selection
-                if (selectedFeatures.length > 0) {
-                    const firstOverlayType = selectedFeatures[0].overlay_type;
-                    if (props.overlay_type !== firstOverlayType) {
-                        console.warn('Cannot compare features from different overlay types');
-                        return;
-                    }
-                }
-
-                // Select
-                if (selectedFeatures.length >= MAX_SELECTIONS) {
-                    // Remove oldest selection (FIFO)
-                    const oldestFeature = selectedFeatures.shift();
-
-                    // Find the numeric ID for the old feature
-                    const oldFeature = data.geojson.features.find(
-                        f => f.properties.feature_id === oldestFeature.id
-                    );
-                    if (oldFeature) {
-                        map.setFeatureState(
-                            { source: 'parcels', id: oldFeature.id },
-                            { selected: false }
-                        );
-                    }
-                }
-
-                // Add new selection
-                selectedFeatures.push({
-                    id: props.feature_id,
-                    label: labelValue,
-                    overlay_type: props.overlay_type,
-                    properties: {
-                        total_value: props.total_value,
-                        land_value: props.land_value,
-                        lot_size: props.lot_size,
-                        net_taxes: props.net_taxes,
-                        net_taxes_per_sqft: props.net_taxes_per_sqft,
-                        taxes_per_city_street_sqft: props.taxes_per_city_street_sqft || 0,
-                        land_value_per_sqft: props.land_value_per_sqft,
-                        alignment_index: props.alignment_index
-                    }
-                });
-
-                map.setFeatureState(
-                    { source: 'parcels', id: featureId },
-                    { selected: true }
-                );
+                handleGroupClick(featureId, props, labelValue);
             }
-
-            // Update badge and sync to Python
-            updateSelectionBadge();
-            syncToPython();
         });
         console.log('Click handler attached');
 
@@ -388,8 +927,15 @@ export default function(component) {
             console.warn('Loading overlay reference is null');
         }
 
-        // Initial sync
-        syncToPython();
+        // Set up control panel event handlers
+        setupControlPanelHandlers();
+        console.log('Control panel handlers attached');
+
+        // Initialize UI state
+        updateIndividualBadge();
+        updateIndividualButtons();
+
+        // NOTE: No initial sync - wait for user to click Compare button
         console.log('Map initialization complete');
     });
 
