@@ -459,12 +459,12 @@ def render_group_comparison(payload: dict, overlay_type: str) -> None:
     st.dataframe(df, use_container_width=True)
 
     # Show group details in expandable sections
-    with st.expander(f"📋 Group 1 Details ({agg1.get('count', 0)} features)"):
+    with st.expander(f"📋 Group 1 Details (n={agg1.get('count', 0)})"):
         features1 = group1.get('features', [])
         if features1:
             st.write(", ".join([f.get('label', f.get('id', 'Unknown')) for f in features1]))
 
-    with st.expander(f"📋 Group 2 Details ({agg2.get('count', 0)} features)"):
+    with st.expander(f"📋 Group 2 Details (n={agg2.get('count', 0)})"):
         features2 = group2.get('features', [])
         if features2:
             st.write(", ".join([f.get('label', f.get('id', 'Unknown')) for f in features2]))
@@ -796,7 +796,9 @@ else:
     # Render MapLibre component with overlay config
     overlay_config = {
         "display_name_field": OVERLAY_TYPES[overlay_type]["display_name_field"],
-        "overlay_type": overlay_type
+        "overlay_type": overlay_type,
+        "label_singular": OVERLAY_TYPES[overlay_type]["comparison_column_prefix"],
+        "label_plural": OVERLAY_TYPES[overlay_type]["label"]
     }
     component_value = render_maplibre_map(
         geojson_data=geojson_data,
@@ -823,8 +825,9 @@ else:
 
             # Check for group mode payload
             if isinstance(selected, dict) and selected.get('comparison_mode') == 'group':
-                popover_label = f"Compare {overlay_label} Groups"
-                with st.popover(f"📊 {popover_label}", icon="🏢", help="View group comparison", use_container_width=True):
+                overlay_singular = OVERLAY_TYPES[overlay_type]["comparison_column_prefix"]
+                popover_label = f"Compare {overlay_singular} Groups"
+                with st.popover(f"📊 {popover_label}", icon="🏢", help="View group comparison", width=600):
                     render_group_comparison(selected, overlay_type)
                 return
 
@@ -833,7 +836,7 @@ else:
             popover_label = f"Compare {overlay_label}"
 
             # Popover button - always visible
-            with st.popover(f"🏘️ {popover_label}", icon="🏢", help=f"View comparison of selected {overlay_label.lower()}", use_container_width=True):
+            with st.popover(f"🏘️ {popover_label}", icon="🏢", help=f"View comparison of selected {overlay_label.lower()}", width=600):
                 # State 0: No features selected
                 if num_selected == 0:
                     st.info(f"👆 Click {overlay_label.lower()} on the map to compare (max 2)")

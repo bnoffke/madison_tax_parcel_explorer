@@ -29,24 +29,27 @@ COMPONENT_CSS = """
 .maplibregl-popup-close-button {
     color: white;
 }
-/* Control Panel Styles */
+/* Control Panel Styles - Dark Mode */
 #map-control-panel .mode-btn:hover:not(.active) {
-    background: #d0d0d0 !important;
+    background: #555 !important;
 }
 #map-control-panel .mode-btn.active {
     background: #4a90d9 !important;
     color: white !important;
 }
-#map-control-panel #confirm-group-btn:not(:disabled):hover {
+#map-control-panel #confirm-group-btn:not(:disabled):hover,
+#map-control-panel #individual-compare-btn:not(:disabled):hover {
     background: #357abd !important;
 }
-#map-control-panel #confirm-group-btn:disabled {
+#map-control-panel #confirm-group-btn:disabled,
+#map-control-panel #individual-compare-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
 }
-#map-control-panel #reset-btn:hover {
-    background: #f5f5f5 !important;
-    border-color: #999 !important;
+#map-control-panel #reset-btn:hover,
+#map-control-panel #individual-clear-btn:hover {
+    background: #444 !important;
+    border-color: #666 !important;
 }
 #map-control-panel #compare-groups-btn:hover {
     background: #218838 !important;
@@ -54,14 +57,14 @@ COMPONENT_CSS = """
 #map-control-panel .selection-item {
     padding: 4px 0;
     font-size: 12px;
-    color: #555;
-    border-bottom: 1px solid #f0f0f0;
+    color: #ccc;
+    border-bottom: 1px solid #444;
 }
 #map-control-panel .selection-item:last-child {
     border-bottom: none;
 }
 #map-control-panel .parcel-id {
-    color: #999;
+    color: #888;
     font-size: 10px;
     display: block;
 }
@@ -82,6 +85,8 @@ export default function(component) {
     };
     const displayField = overlayConfig.display_name_field;
     const overlayType = overlayConfig.overlay_type;
+    const overlayLabelSingular = overlayConfig.label_singular || 'Parcel';
+    const overlayLabelPlural = overlayConfig.label_plural || 'Parcels';
 
     // Selection state
     let selectedFeatures = [];
@@ -121,56 +126,62 @@ export default function(component) {
         // Create unified control panel
         controlPanel = document.createElement('div');
         controlPanel.id = 'map-control-panel';
-        controlPanel.style.cssText = 'position: absolute; top: 60px; right: 10px; background: rgba(255,255,255,0.95); padding: 12px 16px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.2); font-family: system-ui; font-size: 14px; z-index: 1000; min-width: 240px; max-width: 320px;';
+        controlPanel.style.cssText = 'position: absolute; bottom: 30px; left: 10px; background: rgba(30,30,35,0.95); padding: 12px 16px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.4); font-family: system-ui; font-size: 14px; z-index: 1000; min-width: 240px; max-width: 320px; color: #f0f0f0;';
         controlPanel.innerHTML = `
             <!-- Mode Toggle Section -->
-            <div class="mode-toggle-section" style="margin-bottom: 12px; border-bottom: 1px solid #eee; padding-bottom: 12px;">
-                <label style="font-weight: 600; color: #333; display: block; margin-bottom: 6px; font-size: 12px;">Selection Mode</label>
-                <div class="segmented-control" style="display: flex; background: #e0e0e0; border-radius: 6px; overflow: hidden;">
+            <div class="mode-toggle-section" style="margin-bottom: 12px; border-bottom: 1px solid #444; padding-bottom: 12px;">
+                <label style="font-weight: 600; color: #f0f0f0; display: block; margin-bottom: 6px; font-size: 12px;">Selection Mode</label>
+                <div class="segmented-control" style="display: flex; background: #444; border-radius: 6px; overflow: hidden;">
                     <button class="mode-btn active" data-mode="individual" style="flex: 1; padding: 8px 12px; border: none; background: #4a90d9; color: white; cursor: pointer; font-size: 13px; transition: all 0.2s;">Individual</button>
-                    <button class="mode-btn" data-mode="group" style="flex: 1; padding: 8px 12px; border: none; background: transparent; color: #333; cursor: pointer; font-size: 13px; transition: all 0.2s;">Group</button>
+                    <button class="mode-btn" data-mode="group" style="flex: 1; padding: 8px 12px; border: none; background: transparent; color: #ccc; cursor: pointer; font-size: 13px; transition: all 0.2s;">Group</button>
                 </div>
             </div>
 
             <!-- Individual Mode Panel -->
             <div id="individual-mode-panel" style="display: block;">
-                <div style="font-weight: 600; color: #333; margin-bottom: 8px;">
-                    Selected Parcels (<span id="selection-count">0</span>/2)
+                <div style="font-weight: 600; color: #f0f0f0; margin-bottom: 8px;">
+                    Selected ${overlayLabelPlural} (<span id="selection-count">0</span>/2)
                 </div>
                 <div id="selection-list"></div>
-                <div id="individual-empty-state" style="color: #888; font-size: 12px;">Click parcels on the map to select</div>
+                <div id="individual-empty-state" style="color: #888; font-size: 12px;">Click ${overlayLabelPlural.toLowerCase()} on the map to select</div>
+
+                <!-- Action Buttons for Individual Mode -->
+                <div id="individual-action-buttons" style="margin-top: 12px; display: none; gap: 8px;">
+                    <button id="individual-compare-btn" style="flex: 1; padding: 10px; border: none; border-radius: 6px; background: #28a745; color: white; cursor: pointer; font-weight: 600;">🔍 Compare</button>
+                    <button id="individual-clear-btn" style="padding: 10px 16px; border: 1px solid #555; border-radius: 6px; background: #333; color: #ccc; cursor: pointer;">Clear</button>
+                </div>
             </div>
 
             <!-- Group Mode Panel -->
             <div id="group-mode-panel" style="display: none;">
                 <!-- State Indicator -->
-                <div id="group-state-indicator" style="font-weight: 600; color: #333; margin-bottom: 8px;">
-                    Click parcels to start building Group 1
+                <div id="group-state-indicator" style="font-weight: 600; color: #f0f0f0; margin-bottom: 8px;">
+                    Click ${overlayLabelPlural.toLowerCase()} to start building Group 1
                 </div>
 
                 <!-- Active Group Selection Area -->
                 <div id="active-group-section">
                     <div id="active-group-label" style="font-size: 12px; color: #00FFFF; margin-bottom: 4px; font-weight: 600;">Building Group 1:</div>
-                    <div id="active-group-count" style="font-size: 18px; font-weight: bold; color: #00FFFF;">0 parcels</div>
+                    <div id="active-group-count" style="font-size: 18px; font-weight: bold; color: #00FFFF;">0 ${overlayLabelPlural.toLowerCase()}</div>
                     <div id="active-group-list" style="max-height: 100px; overflow-y: auto; margin: 8px 0; font-size: 12px;"></div>
                 </div>
 
                 <!-- Confirmed Groups Summary -->
-                <div id="confirmed-groups-summary" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #eee; display: none;">
+                <div id="confirmed-groups-summary" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #444; display: none;">
                     <div id="confirmed-g1-summary" style="display: none; margin-bottom: 8px;">
                         <span style="color: #00FFFF; font-weight: 600;">● Group 1:</span>
-                        <span id="confirmed-g1-count">0 parcels</span>
+                        <span id="confirmed-g1-count">0 ${overlayLabelPlural.toLowerCase()}</span>
                     </div>
                     <div id="confirmed-g2-summary" style="display: none; margin-bottom: 8px;">
                         <span style="color: #39FF14; font-weight: 600;">● Group 2:</span>
-                        <span id="confirmed-g2-count">0 parcels</span>
+                        <span id="confirmed-g2-count">0 ${overlayLabelPlural.toLowerCase()}</span>
                     </div>
                 </div>
 
                 <!-- Action Buttons -->
                 <div id="group-action-buttons" style="margin-top: 12px; display: flex; gap: 8px;">
                     <button id="confirm-group-btn" disabled style="flex: 1; padding: 10px; border: none; border-radius: 6px; background: #4a90d9; color: white; cursor: pointer; font-weight: 600; opacity: 0.5;">Confirm Group 1</button>
-                    <button id="reset-btn" style="padding: 10px 16px; border: 1px solid #ccc; border-radius: 6px; background: white; color: #666; cursor: pointer;">Reset</button>
+                    <button id="reset-btn" style="padding: 10px 16px; border: 1px solid #555; border-radius: 6px; background: #333; color: #ccc; cursor: pointer;">Reset</button>
                 </div>
 
                 <!-- Compare Groups Button (shown only in COMPLETE state) -->
@@ -187,7 +198,7 @@ export default function(component) {
         loadingOverlay.innerHTML = `
             <div style="text-align: center;">
                 <div style="font-size: 18px; font-weight: bold; color: #333; margin-bottom: 10px;">Loading map...</div>
-                <div style="font-size: 14px; color: #666;">Rendering parcels</div>
+                <div style="font-size: 14px; color: #666;">Rendering ${overlayLabelPlural.toLowerCase()}</div>
             </div>
         `;
 
@@ -307,7 +318,7 @@ export default function(component) {
 
         // State indicator messages
         const stateMessages = {
-            'IDLE': 'Click parcels to start building Group 1',
+            'IDLE': 'Click ' + overlayLabelPlural.toLowerCase() + ' to start building Group 1',
             'SELECTING_G1': 'Building Group 1',
             'SELECTING_G2': 'Building Group 2',
             'COMPLETE': 'Both groups ready!'
@@ -318,7 +329,7 @@ export default function(component) {
         if (groupModeState === 'SELECTING_G1' || groupModeState === 'IDLE') {
             activeGroupLabel.textContent = 'Building Group 1:';
             activeGroupLabel.style.color = SELECTION_COLORS.group1;
-            activeGroupCount.textContent = group1Features.length + ' parcels';
+            activeGroupCount.textContent = group1Features.length + ' ' + overlayLabelPlural.toLowerCase();
             activeGroupCount.style.color = SELECTION_COLORS.group1;
             activeGroupList.innerHTML = group1Features.map(f =>
                 '<div class="selection-item">' + f.label + '</div>'
@@ -327,7 +338,7 @@ export default function(component) {
         } else if (groupModeState === 'SELECTING_G2') {
             activeGroupLabel.textContent = 'Building Group 2:';
             activeGroupLabel.style.color = SELECTION_COLORS.group2;
-            activeGroupCount.textContent = group2Features.length + ' parcels';
+            activeGroupCount.textContent = group2Features.length + ' ' + overlayLabelPlural.toLowerCase();
             activeGroupCount.style.color = SELECTION_COLORS.group2;
             activeGroupList.innerHTML = group2Features.map(f =>
                 '<div class="selection-item">' + f.label + '</div>'
@@ -343,14 +354,14 @@ export default function(component) {
 
             if (confirmedGroup1) {
                 g1Summary.style.display = 'block';
-                g1Count.textContent = confirmedGroup1.features.length + ' parcels';
+                g1Count.textContent = confirmedGroup1.features.length + ' ' + overlayLabelPlural.toLowerCase();
             } else {
                 g1Summary.style.display = 'none';
             }
 
             if (confirmedGroup2) {
                 g2Summary.style.display = 'block';
-                g2Count.textContent = confirmedGroup2.features.length + ' parcels';
+                g2Count.textContent = confirmedGroup2.features.length + ' ' + overlayLabelPlural.toLowerCase();
             } else {
                 g2Summary.style.display = 'none';
             }
@@ -407,9 +418,12 @@ export default function(component) {
             aggregate.land_value_per_sqft = 0;
         }
 
-        // Alignment index is average
-        const alignmentSum = features.reduce((sum, f) => sum + (f.properties.alignment_index || 0), 0);
-        aggregate.alignment_index = alignmentSum / features.length;
+        // Alignment index: land-value weighted average (mathematically correct per formula)
+        const weightedAlignmentSum = features.reduce((sum, f) =>
+            sum + (f.properties.alignment_index || 0) * (f.properties.land_value || 0), 0);
+        aggregate.alignment_index = aggregate.land_value > 0
+            ? weightedAlignmentSum / aggregate.land_value
+            : 0;
 
         return aggregate;
     }
@@ -530,7 +544,7 @@ export default function(component) {
 
         selectionMode = newMode;
 
-        // Update mode button styling
+        // Update mode button styling (dark theme)
         const modeBtns = controlPanel.querySelectorAll('.mode-btn');
         modeBtns.forEach(btn => {
             if (btn.dataset.mode === newMode) {
@@ -540,7 +554,7 @@ export default function(component) {
             } else {
                 btn.classList.remove('active');
                 btn.style.background = 'transparent';
-                btn.style.color = '#333';
+                btn.style.color = '#ccc';
             }
         });
 
@@ -552,8 +566,8 @@ export default function(component) {
             individualPanel.style.display = 'block';
             groupPanel.style.display = 'none';
             updateIndividualBadge();
-            // Sync empty state to Python
-            syncToPython();
+            updateIndividualButtons();
+            // NOTE: Do NOT sync on mode switch - wait for Compare button
         } else {
             individualPanel.style.display = 'none';
             groupPanel.style.display = 'block';
@@ -599,6 +613,18 @@ export default function(component) {
         return true;
     }
 
+    // Update individual mode buttons visibility
+    function updateIndividualButtons() {
+        const buttonsDiv = getElement('#individual-action-buttons');
+        if (!buttonsDiv) return;
+
+        if (selectedFeatures.length > 0) {
+            buttonsDiv.style.display = 'flex';
+        } else {
+            buttonsDiv.style.display = 'none';
+        }
+    }
+
     // Handle individual mode click
     function handleIndividualClick(featureId, props, labelValue) {
         const existingIndex = selectedFeatures.findIndex(f => f.id === props.feature_id);
@@ -622,7 +648,27 @@ export default function(component) {
         }
 
         updateIndividualBadge();
+        updateIndividualButtons();
+        // NOTE: Do NOT sync immediately - wait for Compare button click
+    }
+
+    // Handle individual mode Compare button click
+    function handleIndividualCompare() {
         syncToPython();
+    }
+
+    // Handle individual mode Clear button click
+    function handleIndividualClear() {
+        // Clear all individual mode selections
+        selectedFeatures.forEach(f => {
+            const feature = data.geojson.features.find(gf => gf.properties.feature_id === f.id);
+            if (feature) {
+                map.setFeatureState({ source: 'parcels', id: feature.id }, { selected: false });
+            }
+        });
+        selectedFeatures = [];
+        updateIndividualBadge();
+        updateIndividualButtons();
     }
 
     // Handle group mode click
@@ -677,7 +723,23 @@ export default function(component) {
             });
         });
 
-        // Confirm button
+        // Individual mode: Compare button
+        const individualCompareBtn = getElement('#individual-compare-btn');
+        if (individualCompareBtn) {
+            individualCompareBtn.addEventListener('click', () => {
+                handleIndividualCompare();
+            });
+        }
+
+        // Individual mode: Clear button
+        const individualClearBtn = getElement('#individual-clear-btn');
+        if (individualClearBtn) {
+            individualClearBtn.addEventListener('click', () => {
+                handleIndividualClear();
+            });
+        }
+
+        // Group mode: Confirm button
         const confirmBtn = getElement('#confirm-group-btn');
         if (confirmBtn) {
             confirmBtn.addEventListener('click', () => {
@@ -685,7 +747,7 @@ export default function(component) {
             });
         }
 
-        // Reset button
+        // Group mode: Reset button
         const resetBtn = getElement('#reset-btn');
         if (resetBtn) {
             resetBtn.addEventListener('click', () => {
@@ -693,7 +755,7 @@ export default function(component) {
             });
         }
 
-        // Compare button
+        // Group mode: Compare button
         const compareBtn = getElement('#compare-groups-btn');
         if (compareBtn) {
             compareBtn.addEventListener('click', () => {
@@ -871,9 +933,9 @@ export default function(component) {
 
         // Initialize UI state
         updateIndividualBadge();
+        updateIndividualButtons();
 
-        // Initial sync
-        syncToPython();
+        // NOTE: No initial sync - wait for user to click Compare button
         console.log('Map initialization complete');
     });
 
