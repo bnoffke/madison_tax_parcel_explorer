@@ -395,6 +395,81 @@ def build_comparison_dataframe(parcels: list, overlay_type: str) -> pd.DataFrame
     return df
 
 
+def render_group_comparison(payload: dict, overlay_type: str) -> None:
+    """
+    Render comparison UI for group mode.
+
+    Args:
+        payload: Dict with comparison_mode, group1, group2 keys
+        overlay_type: Current overlay type for metric filtering
+    """
+    group1 = payload.get('group1')
+    group2 = payload.get('group2')
+
+    if not group1 or not group2:
+        st.warning("Incomplete group selection. Please confirm both groups before comparing.")
+        return
+
+    agg1 = group1.get('aggregate')
+    agg2 = group2.get('aggregate')
+
+    if not agg1 or not agg2:
+        st.warning("Missing aggregate data for groups.")
+        return
+
+    # Filter metrics based on overlay type
+    if overlay_type == "parcels":
+        metrics_to_show = [m for m in COMPARISON_METRICS if m["key"] != "taxes_per_city_street_sqft"]
+    else:
+        metrics_to_show = COMPARISON_METRICS
+
+    # Build data dictionary
+    data = {"Metric": [m["label"] for m in metrics_to_show]}
+
+    # Group 1 column
+    g1_values = []
+    for metric in metrics_to_show:
+        value = agg1.get(metric['key'], None)
+        formatted = format_metric_value(value, metric)
+        g1_values.append(formatted)
+    data[f"Group 1 (n={agg1.get('count', 0)})"] = g1_values
+
+    # Group 2 column
+    g2_values = []
+    for metric in metrics_to_show:
+        value = agg2.get(metric['key'], None)
+        formatted = format_metric_value(value, metric)
+        g2_values.append(formatted)
+    data[f"Group 2 (n={agg2.get('count', 0)})"] = g2_values
+
+    # Difference column
+    diff_values = []
+    for metric in metrics_to_show:
+        val1 = agg1.get(metric['key'], None)
+        val2 = agg2.get(metric['key'], None)
+        delta = calculate_metric_delta(val1, val2, metric)
+        diff_values.append(delta)
+    data["Difference"] = diff_values
+
+    # Create DataFrame
+    df = pd.DataFrame(data)
+    df.set_index('Metric', inplace=True)
+
+    # Display
+    st.dataframe(df, use_container_width=True)
+
+    # Show group details in expandable sections
+    with st.expander(f"📋 Group 1 Details ({agg1.get('count', 0)} features)"):
+        features1 = group1.get('features', [])
+        if features1:
+            st.write(", ".join([f.get('label', f.get('id', 'Unknown')) for f in features1]))
+
+    with st.expander(f"📋 Group 2 Details ({agg2.get('count', 0)} features)"):
+        features2 = group2.get('features', [])
+        if features2:
+            st.write(", ".join([f.get('label', f.get('id', 'Unknown')) for f in features2]))
+
+
 def filter_dataframe(df: pd.DataFrame, overlay_type: str, area_plans: list, alder_districts: list,
                      property_class: str, property_use: str) -> pd.DataFrame:
     """
@@ -742,14 +817,23 @@ else:
         def comparison_popover():
             """Render comparison popover for selected features."""
             selected = st.session_state.get('map_selected_parcels', [])
-            num_selected = len(selected)
 
             # Update popover label based on overlay type
             overlay_label = OVERLAY_TYPES[overlay_type]["label"]
+
+            # Check for group mode payload
+            if isinstance(selected, dict) and selected.get('comparison_mode') == 'group':
+                popover_label = f"Compare {overlay_label} Groups"
+                with st.popover(f"📊 {popover_label}", icon="🏢", help="View group comparison", use_container_width=True):
+                    render_group_comparison(selected, overlay_type)
+                return
+
+            # Individual mode (existing logic)
+            num_selected = len(selected) if selected else 0
             popover_label = f"Compare {overlay_label}"
 
             # Popover button - always visible
-            with st.popover(f"🏘️{popover_label}", icon="🏢", help=f"View comparison of selected {overlay_label.lower()}", width=600):
+            with st.popover(f"🏘️ {popover_label}", icon="🏢", help=f"View comparison of selected {overlay_label.lower()}", use_container_width=True):
                 # State 0: No features selected
                 if num_selected == 0:
                     st.info(f"👆 Click {overlay_label.lower()} on the map to compare (max 2)")
