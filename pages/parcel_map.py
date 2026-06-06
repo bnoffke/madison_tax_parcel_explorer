@@ -62,7 +62,7 @@ COMPARISON_METRICS = [
     {"label": "Land Value/sqft",         "key": "land_value_per_sqft",      "type": "currency", "decimals": 2, "aggregate_only": False},
     {"label": "Alignment Index",         "key": "alignment_index",          "type": "number",   "decimals": 2, "aggregate_only": False},
     {"label": "Vehicle Pavement/DU",     "key": "vehicle_surface_per_du",   "type": "area",     "decimals": 0, "aggregate_only": True},
-    {"label": "People/100sqft Vehicle",  "key": "people_to_vehicle_ratio_pct", "type": "number", "decimals": 1, "aggregate_only": True},
+    {"label": "People sqft/100sqft Vehicle",  "key": "people_to_vehicle_ratio_pct", "type": "number", "decimals": 1, "aggregate_only": True},
 ]
 
 # Magma colormap stops (normalized position, RGB) - reversed
@@ -767,15 +767,6 @@ with st.sidebar:
         selected_property_class = None
         selected_property_use = None
 
-    # Legend
-    st.markdown("### Legend")
-    st.markdown(f"**{selected_metric_label}**")
-    st.markdown("""
-    <div style="background: linear-gradient(to right, #FCFDBF, #FC8F59, #B73779, #521C6C, #000004); height: 20px; width: 100%; border-radius: 4px;"></div>
-    <div style="display: flex; justify-content: space-between; font-size: 12px;">
-        <span>Low</span><span>High</span>
-    </div>
-    """, unsafe_allow_html=True)
 
 # Load data (cached by overlay type only)
 df = load_map_data(conn, GOLD_BUCKET, overlay_type)
@@ -792,14 +783,25 @@ if df.empty:
     st.warning("No data available. Please check the data source.")
 else:
 
-    # Show metric range in sidebar
     with st.sidebar:
         if selected_metric_format == "currency":
-            st.caption(f"Range: ${p2:.2f} - ${p98:.2f}")
+            label_low = f"${p2:,.2f}"
+            label_high = f"${p98:,.2f}"
         elif selected_metric_format == "area":
-            st.caption(f"Range: {p2:,.0f} - {p98:,.0f} sq ft")
+            label_low = f"{p2:,.0f} sq ft"
+            label_high = f"{p98:,.0f} sq ft"
         else:
-            st.caption(f"Range: {p2:.2f} - {p98:.2f}")
+            label_low = f"{p2:.2f}"
+            label_high = f"{p98:.2f}"
+
+        st.markdown("### Legend")
+        st.markdown(f"**{selected_metric_label}**")
+        st.markdown(f"""
+<div style="background: linear-gradient(to right, #FCFDBF, #FC8F59, #B73779, #521C6C, #000004); height: 20px; width: 100%; border-radius: 4px;"></div>
+<div style="display: flex; justify-content: space-between; font-size: 12px;">
+    <span>{label_low}</span><span>{label_high}</span>
+</div>
+""", unsafe_allow_html=True)
 
         # Update caption based on overlay type
         overlay_label = OVERLAY_TYPES[overlay_type]["label"]

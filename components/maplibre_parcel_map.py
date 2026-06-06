@@ -893,7 +893,7 @@ export default function(component) {
             // Build surface metric lines (only for aggregated overlays)
             const surfaceLines = (overlayType !== 'parcels')
                 ? `<b>Vehicle Pavement/DU:</b> ${(props.vehicle_surface_per_du || 0).toFixed(0)} sq ft<br/>`
-                + `<b>People/100sqft Vehicle:</b> ${(props.people_to_vehicle_ratio_pct || 0).toFixed(1)}<br/>`
+                + `<b>People sqft/100sqft Vehicle:</b> ${(props.people_to_vehicle_ratio_pct || 0).toFixed(1)}<br/>`
                 : '';
 
             const html = `
