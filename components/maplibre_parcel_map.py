@@ -399,7 +399,10 @@ export default function(component) {
             total_value: 0,
             land_value: 0,
             lot_size: 0,
-            net_taxes: 0
+            net_taxes: 0,
+            total_people_surface: 0,
+            total_vehicle_surface: 0,
+            total_dwelling_units: 0
         };
 
         features.forEach(f => {
@@ -407,6 +410,9 @@ export default function(component) {
             aggregate.land_value += f.properties.land_value || 0;
             aggregate.lot_size += f.properties.lot_size || 0;
             aggregate.net_taxes += f.properties.net_taxes || 0;
+            aggregate.total_people_surface += f.properties.total_people_surface || 0;
+            aggregate.total_vehicle_surface += f.properties.total_vehicle_surface || 0;
+            aggregate.total_dwelling_units += f.properties.total_dwelling_units || 0;
         });
 
         // Calculate derived metrics
@@ -424,6 +430,12 @@ export default function(component) {
         aggregate.alignment_index = aggregate.land_value > 0
             ? weightedAlignmentSum / aggregate.land_value
             : 0;
+
+        // Surface metrics: derive from summed components (not averaged ratios)
+        aggregate.vehicle_surface_per_du = aggregate.total_dwelling_units > 0
+            ? aggregate.total_vehicle_surface / aggregate.total_dwelling_units : 0;
+        aggregate.people_to_vehicle_ratio_pct = aggregate.total_vehicle_surface > 0
+            ? (aggregate.total_people_surface / aggregate.total_vehicle_surface) * 100 : 0;
 
         return aggregate;
     }
@@ -590,7 +602,14 @@ export default function(component) {
                 net_taxes_per_sqft: props.net_taxes_per_sqft,
                 taxes_per_city_street_sqft: props.taxes_per_city_street_sqft || 0,
                 land_value_per_sqft: props.land_value_per_sqft,
-                alignment_index: props.alignment_index
+                alignment_index: props.alignment_index,
+                // Surface metrics (aggregate overlays only)
+                vehicle_surface_per_du:      props.vehicle_surface_per_du      || 0,
+                people_to_vehicle_ratio_pct: props.people_to_vehicle_ratio_pct || 0,
+                // Components for correct group aggregation
+                total_people_surface:  props.total_people_surface  || 0,
+                total_vehicle_surface: props.total_vehicle_surface || 0,
+                total_dwelling_units:  props.total_dwelling_units  || 0
             }
         };
     }
@@ -871,6 +890,12 @@ export default function(component) {
                 ? `<b>Taxes/City Street sqft:</b> $${props.taxes_per_city_street_sqft.toFixed(2)}<br/>`
                 : '';
 
+            // Build surface metric lines (only for aggregated overlays)
+            const surfaceLines = (overlayType !== 'parcels')
+                ? `<b>Vehicle Pavement/DU:</b> ${(props.vehicle_surface_per_du || 0).toFixed(0)} sq ft<br/>`
+                + `<b>People/100sqft Vehicle:</b> ${(props.people_to_vehicle_ratio_pct || 0).toFixed(1)}<br/>`
+                : '';
+
             const html = `
                 <b>${labelValue}</b><br/>
                 ${propertyClassLine}
@@ -883,7 +908,8 @@ export default function(component) {
                 <b>Net Taxes/sqft:</b> $${props.net_taxes_per_sqft.toFixed(2)}<br/>
                 ${cityStreetLine}
                 <b>Land Value/sqft:</b> $${props.land_value_per_sqft.toFixed(2)}<br/>
-                <b>Alignment Index:</b> ${props.alignment_index.toFixed(2)}
+                <b>Alignment Index:</b> ${props.alignment_index.toFixed(2)}<br/>
+                ${surfaceLines}
             `;
 
             popup.setLngLat(e.lngLat).setHTML(html).addTo(map);

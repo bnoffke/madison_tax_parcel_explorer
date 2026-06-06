@@ -12,9 +12,12 @@ conn, _, GOLD_BUCKET = get_connection()
 
 # Metric configuration
 METRICS = {
-    "Net Taxes per Sq Ft": "net_taxes_per_sqft_lot",
-    "Land Value per Sq Ft": "land_value_per_sqft_lot",
-    "Land Value Alignment Index": "land_value_alignment_index",
+    "Net Taxes per Sq Ft":                        {"column": "net_taxes_per_sqft_lot",                  "format": "currency", "aggregate_only": False},
+    "Land Value per Sq Ft":                       {"column": "land_value_per_sqft_lot",                 "format": "currency", "aggregate_only": False},
+    "Land Value Alignment Index":                 {"column": "land_value_alignment_index",              "format": "number",   "aggregate_only": False},
+    "Taxes per City Street sqft":                 {"column": "taxes_per_city_maint_street_sqft",        "format": "currency", "aggregate_only": True},
+    "Vehicle Pavement/Dwelling Unit":              {"column": "vehicle_surface_area_per_dwelling_unit",  "format": "area",     "aggregate_only": True},
+    "Sqft People Space/100 sqft Vehicle Pavement": {"column": "people_to_vehicle_surface_ratio_pct",   "format": "number",   "aggregate_only": True},
 }
 
 # Overlay configuration - defines available map overlay types
@@ -50,14 +53,16 @@ OVERLAY_DISPLAY_ORDER = ["area_plans", "alder_districts", "parcels"]
 
 # Comparison metrics configuration
 COMPARISON_METRICS = [
-    {"label": "Total Value", "key": "total_value", "type": "currency", "decimals": 0},
-    {"label": "Land Value", "key": "land_value", "type": "currency", "decimals": 0},
-    {"label": "Lot Size", "key": "lot_size", "type": "area", "decimals": 0},
-    {"label": "Net Taxes", "key": "net_taxes", "type": "currency", "decimals": 0},
-    {"label": "Net Taxes/sqft", "key": "net_taxes_per_sqft", "type": "currency", "decimals": 2},
-    {"label": "Taxes/City Street sqft", "key": "taxes_per_city_street_sqft", "type": "currency", "decimals": 2},
-    {"label": "Land Value/sqft", "key": "land_value_per_sqft", "type": "currency", "decimals": 2},
-    {"label": "Alignment Index", "key": "alignment_index", "type": "number", "decimals": 2}
+    {"label": "Total Value",             "key": "total_value",              "type": "currency", "decimals": 0, "aggregate_only": False},
+    {"label": "Land Value",              "key": "land_value",               "type": "currency", "decimals": 0, "aggregate_only": False},
+    {"label": "Lot Size",                "key": "lot_size",                 "type": "area",     "decimals": 0, "aggregate_only": False},
+    {"label": "Net Taxes",               "key": "net_taxes",                "type": "currency", "decimals": 0, "aggregate_only": False},
+    {"label": "Net Taxes/sqft",          "key": "net_taxes_per_sqft",       "type": "currency", "decimals": 2, "aggregate_only": False},
+    {"label": "Taxes/City Street sqft",  "key": "taxes_per_city_street_sqft", "type": "currency", "decimals": 2, "aggregate_only": True},
+    {"label": "Land Value/sqft",         "key": "land_value_per_sqft",      "type": "currency", "decimals": 2, "aggregate_only": False},
+    {"label": "Alignment Index",         "key": "alignment_index",          "type": "number",   "decimals": 2, "aggregate_only": False},
+    {"label": "Vehicle Pavement/DU",     "key": "vehicle_surface_per_du",   "type": "area",     "decimals": 0, "aggregate_only": True},
+    {"label": "People/100sqft Vehicle",  "key": "people_to_vehicle_ratio_pct", "type": "number", "decimals": 1, "aggregate_only": True},
 ]
 
 # Magma colormap stops (normalized position, RGB) - reversed
@@ -130,8 +135,9 @@ def load_map_data(_conn, gold_bucket: str, overlay_type: str) -> pd.DataFrame:
             net_taxes,
             lot_size,
         """
-        # Parcels don't have city street metrics
+        # Parcels don't have city street or surface metrics
         city_street_columns = ""
+        surface_columns = ""
         # Additional filters for parcels only
         additional_filters = """
         AND net_taxes > 0
@@ -155,6 +161,15 @@ def load_map_data(_conn, gold_bucket: str, overlay_type: str) -> pd.DataFrame:
         city_street_columns = """
             taxes_per_city_maint_street_sqft,
         """
+        # Surface metrics (only available at aggregated level)
+        surface_columns = """
+            people_surface_area_per_dwelling_unit,
+            vehicle_surface_area_per_dwelling_unit,
+            people_to_vehicle_surface_ratio * 100 AS people_to_vehicle_surface_ratio_pct,
+            total_people_impervious_surface_area,
+            total_vehicle_impervious_surface_area,
+            total_dwelling_units,
+        """
         # No additional filters for aggregated overlays
         additional_filters = ""
 
@@ -164,6 +179,7 @@ def load_map_data(_conn, gold_bucket: str, overlay_type: str) -> pd.DataFrame:
         geom_4326_geojson,
         {value_columns}
         {city_street_columns}
+        {surface_columns}
         net_taxes_per_sqft_lot,
         land_value_per_sqft_lot,
         land_value_alignment_index
@@ -342,13 +358,9 @@ def build_comparison_dataframe(parcels: list, overlay_type: str) -> pd.DataFrame
             st.warning("⚠️ Cannot compare features from different overlay types. Please select features of the same type.")
             return pd.DataFrame()
 
-    # Filter metrics based on overlay type
-    if overlay_type == "parcels":
-        # Exclude city street metric for parcels
-        metrics_to_show = [m for m in COMPARISON_METRICS if m["key"] != "taxes_per_city_street_sqft"]
-    else:
-        # Show all metrics for aggregated overlays
-        metrics_to_show = COMPARISON_METRICS
+    # Filter out aggregate-only metrics for parcels overlay
+    metrics_to_show = [m for m in COMPARISON_METRICS
+                       if not (overlay_type == "parcels" and m.get("aggregate_only"))]
 
     # Build data dictionary
     data = {"Metric": [m["label"] for m in metrics_to_show]}
@@ -417,11 +429,9 @@ def render_group_comparison(payload: dict, overlay_type: str) -> None:
         st.warning("Missing aggregate data for groups.")
         return
 
-    # Filter metrics based on overlay type
-    if overlay_type == "parcels":
-        metrics_to_show = [m for m in COMPARISON_METRICS if m["key"] != "taxes_per_city_street_sqft"]
-    else:
-        metrics_to_show = COMPARISON_METRICS
+    # Filter out aggregate-only metrics for parcels overlay
+    metrics_to_show = [m for m in COMPARISON_METRICS
+                       if not (overlay_type == "parcels" and m.get("aggregate_only"))]
 
     # Build data dictionary
     data = {"Metric": [m["label"] for m in metrics_to_show]}
@@ -564,6 +574,13 @@ def build_geojson_maplibre(df: pd.DataFrame, metric: str, overlay_type: str) -> 
                 "taxes_per_city_street_sqft": float(row['taxes_per_city_maint_street_sqft']) if 'taxes_per_city_maint_street_sqft' in row and pd.notna(row['taxes_per_city_maint_street_sqft']) else 0,
                 "land_value_per_sqft": float(row['land_value_per_sqft_lot']) if pd.notna(row['land_value_per_sqft_lot']) else 0,
                 "alignment_index": float(row['land_value_alignment_index']) if pd.notna(row['land_value_alignment_index']) else 0,
+                # Surface metrics (aggregate overlays only)
+                "vehicle_surface_per_du": float(row['vehicle_surface_area_per_dwelling_unit']) if 'vehicle_surface_area_per_dwelling_unit' in row and pd.notna(row['vehicle_surface_area_per_dwelling_unit']) else 0,
+                "people_to_vehicle_ratio_pct": float(row['people_to_vehicle_surface_ratio_pct']) if 'people_to_vehicle_surface_ratio_pct' in row and pd.notna(row['people_to_vehicle_surface_ratio_pct']) else 0,
+                # Components for correct group aggregation
+                "total_people_surface": float(row['total_people_impervious_surface_area']) if 'total_people_impervious_surface_area' in row and pd.notna(row['total_people_impervious_surface_area']) else 0,
+                "total_vehicle_surface": float(row['total_vehicle_impervious_surface_area']) if 'total_vehicle_impervious_surface_area' in row and pd.notna(row['total_vehicle_impervious_surface_area']) else 0,
+                "total_dwelling_units": float(row['total_dwelling_units']) if 'total_dwelling_units' in row and pd.notna(row['total_dwelling_units']) else 0,
 
                 # Pre-computed color (CSS rgba string)
                 "fillColor": css_colors[i]
@@ -670,12 +687,17 @@ with st.sidebar:
     # Update session state
     st.session_state.selected_overlay_type = overlay_type
 
-    # Metric selector
+    # Metric selector — filter out aggregate-only metrics for parcels overlay
+    available_metrics = {
+        label: cfg for label, cfg in METRICS.items()
+        if not (cfg["aggregate_only"] and overlay_type == "parcels")
+    }
     selected_metric_label = st.selectbox(
         "Select Metric",
-        options=list(METRICS.keys()),
+        options=list(available_metrics.keys()),
     )
-    selected_metric = METRICS[selected_metric_label]
+    selected_metric = available_metrics[selected_metric_label]["column"]
+    selected_metric_format = available_metrics[selected_metric_label]["format"]
 
     # Parcel-specific filters (only shown when parcels overlay is selected)
     if overlay_type == "parcels":
@@ -772,10 +794,12 @@ else:
 
     # Show metric range in sidebar
     with st.sidebar:
-        if selected_metric == "land_value_alignment_index":
-            st.caption(f"Range: {p2:.2f} - {p98:.2f}")
-        else:
+        if selected_metric_format == "currency":
             st.caption(f"Range: ${p2:.2f} - ${p98:.2f}")
+        elif selected_metric_format == "area":
+            st.caption(f"Range: {p2:,.0f} - {p98:,.0f} sq ft")
+        else:
+            st.caption(f"Range: {p2:.2f} - {p98:.2f}")
 
         # Update caption based on overlay type
         overlay_label = OVERLAY_TYPES[overlay_type]["label"]
