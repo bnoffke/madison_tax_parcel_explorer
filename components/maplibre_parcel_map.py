@@ -844,16 +844,16 @@ export default function(component) {
         });
         console.log('Selection outline layer added');
 
-        // Subtle default borders
+        // Subtle default borders (grey for site-level overlays, white for parcels)
         console.log('Adding default border layer...');
         map.addLayer({
             id: 'parcels-line-default',
             type: 'line',
             source: 'parcels',
             paint: {
-                'line-color': '#ffffff',
-                'line-width': 0.5,
-                'line-opacity': 0.3
+                'line-color': ['match', ['get', 'overlay_type'], 'parcels', '#ffffff', '#aaaaaa'],
+                'line-width': ['match', ['get', 'overlay_type'], 'parcels', 0.5, 0.75],
+                'line-opacity': ['match', ['get', 'overlay_type'], 'parcels', 0.3, 0.45]
             }
         });
         console.log('Default border layer added');
