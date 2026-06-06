@@ -109,6 +109,8 @@ def load_parcel_data(_conn, parcel_id: str, silver_bucket: str) -> dict:
     SELECT *
     FROM read_parquet('{silver_bucket}/fact_parcels.parquet')
     WHERE parcel_id = '{parcel_id.replace("'", "''")}'
+    ORDER BY parcel_year DESC
+    LIMIT 1
     """
 
     try:
@@ -475,11 +477,33 @@ if selected_value and selected_value is not None:
         parcel_data = load_parcel_data(conn, parcel_id, SILVER_BUCKET)
 
     if parcel_data:
+        # Load tax history and supplement with latest fact_parcels year if ahead of tax_roll
+        tax_history_df = load_tax_roll_history(conn, parcel_id, SILVER_BUCKET)
+        if not tax_history_df.empty:
+            parcel_year = parcel_data.get('parcel_year')
+            max_tax_year = tax_history_df['tax_year'].max()
+            if parcel_year and parcel_year > max_tax_year:
+                supplement_row = pd.DataFrame([{
+                    'tax_year': parcel_year,
+                    'total_assessed_value': parcel_data.get('current_total_value'),
+                    'assessed_value_land': parcel_data.get('current_land_value'),
+                    'assessed_value_improvement': parcel_data.get('current_improvement_value'),
+                    'net_tax': None,
+                    'city_tax': None,
+                    'county_tax': None,
+                    'school_tax': None,
+                    'matc_tax': None,
+                    'effective_tax_rate': None,
+                }])
+                tax_history_df = pd.concat([tax_history_df, supplement_row], ignore_index=True)
+
         # Layout: slim left column (20%) for tables, wide right column (80%) for charts
         left_col, right_col = st.columns([0.2, 0.8])
 
         with left_col:
             st.markdown("#### Assessments")
+            if parcel_data.get('parcel_year'):
+                st.caption(f"Assessment year: {int(parcel_data['parcel_year'])}")
             assessment_data = pd.DataFrame({
                 "Metric": [
                     "Land Value",
@@ -545,9 +569,6 @@ if selected_value and selected_value is not None:
             st.dataframe(efficiency_data, hide_index=True, width='stretch')
 
         with right_col:
-            # Load historical tax roll data
-            tax_history_df = load_tax_roll_history(conn, parcel_id, SILVER_BUCKET)
-
             if not tax_history_df.empty and len(tax_history_df) >= 2:
                 st.markdown("#### Historical Trends")
 

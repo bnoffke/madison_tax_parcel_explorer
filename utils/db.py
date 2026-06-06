@@ -56,6 +56,7 @@ def load_address_data(_conn, silver_bucket: str) -> list[tuple[str, str]]:
     SELECT full_address, parcel_id
     FROM read_parquet('{silver_bucket}/fact_parcels.parquet')
     WHERE full_address IS NOT NULL
+    AND parcel_year = (SELECT MAX(parcel_year) FROM read_parquet('{silver_bucket}/fact_parcels.parquet'))
     ORDER BY full_address
     """
     return _conn.execute(query).fetchall()
