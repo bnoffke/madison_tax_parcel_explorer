@@ -28,3 +28,11 @@ with col2:
     Visualize property metrics across the city with an interactive map
     and customizable metric overlays.
     """)
+
+st.markdown("""
+---
+
+📖 Looking for an extended data dictionary? Explore the underlying data
+models and field definitions in the
+[dbt docs](https://bnoffke.github.io/stmsn_dbt).
+""")
