@@ -5,6 +5,13 @@ import numpy as np
 
 from utils.db import get_connection
 from utils.formatters import format_currency, format_number
+from utils.url_state import (
+    build_share_url,
+    decode_map_state,
+    encode_map_state,
+    render_share_control,
+    sync_query_params,
+)
 from components.glossary_dialog import render_glossary_button
 
 # Access shared state (initializes if needed)
@@ -19,6 +26,18 @@ METRICS = {
     "Vehicle Pavement/Dwelling Unit":              {"column": "vehicle_surface_area_per_dwelling_unit",  "format": "area",     "aggregate_only": True},
     "Sqft People Space/100 sqft Vehicle Pavement": {"column": "people_to_vehicle_surface_ratio_pct",   "format": "number",   "aggregate_only": True},
 }
+
+# Reverse lookup for URL params — assumes METRICS columns are unique (true today)
+METRIC_COLUMN_TO_LABEL = {cfg["column"]: label for label, cfg in METRICS.items()}
+DEFAULT_METRIC_LABEL = next(iter(METRICS))
+
+
+def available_metric_labels(overlay_type: str) -> list[str]:
+    """Metric labels selectable for an overlay (parcels lack aggregate-only metrics)."""
+    return [
+        label for label, cfg in METRICS.items()
+        if not (cfg["aggregate_only"] and overlay_type == "parcels")
+    ]
 
 # Overlay configuration - defines available map overlay types
 OVERLAY_TYPES = {
@@ -650,6 +669,34 @@ def get_filtered_options(df_combinations, selected_areas, selected_districts,
     return available_areas, available_districts, available_classes, available_uses
 
 
+def sanitize_parcel_filters(df_combinations, area_plans, alder_districts,
+                            property_class, property_use):
+    """
+    Drop filter values that can't coexist, in cascade priority order
+    (area plans -> alder districts -> class -> use).
+
+    Guarantees every returned value is present in the option list that
+    get_filtered_options() will compute for its widget, so the values are safe to
+    pass as default=/index= (st.multiselect raises on a default outside options).
+    """
+    available_areas, _, _, _ = get_filtered_options(df_combinations, [], [], None, None)
+    area_plans = [v for v in (area_plans or []) if v in available_areas]
+
+    _, available_districts, _, _ = get_filtered_options(
+        df_combinations, area_plans, [], None, None)
+    alder_districts = [v for v in (alder_districts or []) if v in available_districts]
+
+    _, _, available_classes, _ = get_filtered_options(
+        df_combinations, area_plans, alder_districts, None, None)
+    property_class = property_class if property_class in available_classes else None
+
+    _, _, _, available_uses = get_filtered_options(
+        df_combinations, area_plans, alder_districts, property_class, None)
+    property_use = property_use if property_use in available_uses else None
+
+    return area_plans, alder_districts, property_class, property_use
+
+
 # Initialize session state for overlay type
 if 'selected_overlay_type' not in st.session_state:
     st.session_state.selected_overlay_type = DEFAULT_OVERLAY
@@ -661,6 +708,8 @@ if 'selected_property_classes' not in st.session_state:
     st.session_state.selected_property_classes = None
 if 'selected_property_uses' not in st.session_state:
     st.session_state.selected_property_uses = None
+if 'selected_metric_label' not in st.session_state:
+    st.session_state.selected_metric_label = DEFAULT_METRIC_LABEL
 
 # Callback to clear selections when overlay changes
 def on_overlay_change():
@@ -669,6 +718,55 @@ def on_overlay_change():
     st.session_state.selected_alder_districts = []
     st.session_state.selected_property_classes = None
     st.session_state.selected_property_uses = None
+
+    # Coerce the metric if it isn't available for the new overlay. Callbacks run
+    # before widgets are instantiated, so writing the widget key here is safe.
+    new_overlay = st.session_state.get("overlay_selector", DEFAULT_OVERLAY)
+    allowed_metrics = available_metric_labels(new_overlay)
+    if st.session_state.get("selected_metric_label") not in allowed_metrics:
+        st.session_state.selected_metric_label = allowed_metrics[0]
+        st.session_state.metric_selector = allowed_metrics[0]
+
+
+def hydrate_state_from_query_params():
+    """Seed the selected_* session state mirrors from the URL query params.
+
+    Only the mirrors are written, never widget keys — the widgets also pass
+    index=/default= sourced from these mirrors. Invalid values are coerced rather
+    than surfaced as errors; the URL is rewritten to the effective state after the
+    sidebar renders, so a shared link always reproduces what the sharer saw.
+    """
+    state = decode_map_state(OVERLAY_DISPLAY_ORDER, set(METRIC_COLUMN_TO_LABEL))
+
+    overlay = state["overlay_type"] or DEFAULT_OVERLAY
+    st.session_state.selected_overlay_type = overlay
+
+    metric_label = METRIC_COLUMN_TO_LABEL.get(state["metric_column"] or "")
+    allowed_metrics = available_metric_labels(overlay)
+    st.session_state.selected_metric_label = (
+        metric_label if metric_label in allowed_metrics else allowed_metrics[0]
+    )
+
+    # Parcel filters only apply to the parcels overlay; ignored otherwise
+    if overlay == "parcels":
+        df_combinations = load_parcel_filter_options(conn, GOLD_BUCKET)
+        area_plans, alder_districts, property_class, property_use = sanitize_parcel_filters(
+            df_combinations,
+            state["area_plans"],
+            state["alder_districts"],
+            state["property_class"],
+            state["property_use"],
+        )
+        st.session_state.selected_area_plans = area_plans
+        st.session_state.selected_alder_districts = alder_districts
+        st.session_state.selected_property_classes = property_class
+        st.session_state.selected_property_uses = property_use
+
+
+# Apply URL state once per session; after that widget interaction owns the state
+if not st.session_state.get('_map_url_hydrated'):
+    hydrate_state_from_query_params()
+    st.session_state._map_url_hydrated = True
 
 # Sidebar
 with st.sidebar:
@@ -688,14 +786,26 @@ with st.sidebar:
     st.session_state.selected_overlay_type = overlay_type
 
     # Metric selector — filter out aggregate-only metrics for parcels overlay
-    available_metrics = {
-        label: cfg for label, cfg in METRICS.items()
-        if not (cfg["aggregate_only"] and overlay_type == "parcels")
-    }
+    metric_labels = available_metric_labels(overlay_type)
+    available_metrics = {label: METRICS[label] for label in metric_labels}
+    try:
+        metric_index = metric_labels.index(st.session_state.selected_metric_label)
+    except ValueError:
+        metric_index = 0
+
     selected_metric_label = st.selectbox(
         "Select Metric",
-        options=list(available_metrics.keys()),
+        options=metric_labels,
+        index=metric_index,
+        key="metric_selector",
     )
+    # Defensive: selectbox can echo a stale label when the options list shrinks.
+    # Don't write metric_selector here — that raises post-instantiation; the
+    # on_overlay_change callback is the write path.
+    if selected_metric_label not in available_metrics:
+        selected_metric_label = metric_labels[0]
+    st.session_state.selected_metric_label = selected_metric_label
+
     selected_metric = available_metrics[selected_metric_label]["column"]
     selected_metric_format = available_metrics[selected_metric_label]["format"]
 
@@ -766,6 +876,21 @@ with st.sidebar:
         selected_alder_districts = []
         selected_property_class = None
         selected_property_use = None
+
+    # Keep the browser URL in sync with the effective selections and expose a
+    # shareable link. Runs after the widgets, so coerced values self-clean the URL.
+    url_params = encode_map_state(
+        overlay_type=overlay_type,
+        metric_column=selected_metric,
+        area_plans=selected_area_plans,
+        alder_districts=selected_alder_districts,
+        property_class=selected_property_class,
+        property_use=selected_property_use,
+    )
+    sync_query_params(url_params)
+
+    st.markdown("---")
+    render_share_control(build_share_url(url_params))
 
 
 # Load data (cached by overlay type only)
