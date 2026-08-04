@@ -889,7 +889,6 @@ with st.sidebar:
     )
     sync_query_params(url_params)
 
-    st.markdown("---")
     render_share_control(build_share_url(url_params))
 
 
@@ -935,7 +934,6 @@ else:
         st.info("Map may take a minute to load.")
 
         # Glossary
-        st.markdown("---")
         render_glossary_button()
 
     # Import map component
