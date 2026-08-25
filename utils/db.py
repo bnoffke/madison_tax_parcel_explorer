@@ -1,44 +1,29 @@
 """DuckDB connection management using Streamlit caching."""
 
 import streamlit as st
-import duckdb
+from stmsn_query import connect
 
 
-@st.cache_resource
+@st.cache_resource(ttl=3600)  # Reconnect hourly; the catalog is replaced daily
 def get_duckdb_connection():
     """
-    Get or create a shared DuckDB connection (app-wide singleton).
+    Get or create a shared DuckDB connection to the stmsn lakehouse.
 
-    This connection is shared across all user sessions and persists
-    for the lifetime of the Streamlit app.
+    This connection is shared across all user sessions. The DuckLake catalog is
+    attached READ_ONLY as `stmsn` and `USE stmsn` is applied, so queries can
+    reference tables as `<schema>.<table>`.
 
     Returns:
         duckdb.DuckDBPyConnection: Shared DuckDB connection
     """
-    conn = duckdb.connect()  # In-memory database
-
-    # Load extensions (once for all sessions)
-    conn.execute("""
-        INSTALL httpfs;
-        LOAD httpfs;
-        INSTALL spatial;
-        LOAD spatial;
-    """)
-
-    # Create GCS secret (once for all sessions)
-    conn.execute(f"""
-        CREATE SECRET gcs_secret (
-            TYPE gcs,
-            KEY_ID '{st.secrets["gcs"]["key_id"]}',
-            SECRET '{st.secrets["gcs"]["secret"]}'
-        );
-    """)
-
-    return conn
+    return connect(
+        key_id=st.secrets["gcs"]["key_id"],
+        secret=st.secrets["gcs"]["secret"],
+    )
 
 
 @st.cache_data(ttl=3600)  # Cache for 1 hour, shared across sessions
-def load_address_data(_conn, silver_bucket: str) -> list[tuple[str, str]]:
+def load_address_data(_conn) -> list[tuple[str, str]]:
     """
     Load parcel addresses for search functionality.
 
@@ -47,16 +32,15 @@ def load_address_data(_conn, silver_bucket: str) -> list[tuple[str, str]]:
 
     Args:
         _conn: DuckDB connection (not hashed by Streamlit)
-        silver_bucket: GCS bucket path for silver layer data
 
     Returns:
         List of (full_address, parcel_id) tuples
     """
-    query = f"""
+    query = """
     SELECT full_address, parcel_id
-    FROM read_parquet('{silver_bucket}/fact_parcels.parquet')
+    FROM silver.fact_parcels
     WHERE full_address IS NOT NULL
-    AND parcel_year = (SELECT MAX(parcel_year) FROM read_parquet('{silver_bucket}/fact_parcels.parquet'))
+    AND parcel_year = (SELECT MAX(parcel_year) FROM silver.fact_parcels)
     ORDER BY full_address
     """
     return _conn.execute(query).fetchall()
@@ -64,13 +48,9 @@ def load_address_data(_conn, silver_bucket: str) -> list[tuple[str, str]]:
 
 def get_connection():
     """
-    Get connection and bucket paths.
+    Get the shared lakehouse connection.
 
     Returns:
-        tuple: (conn, silver_bucket, gold_bucket)
+        duckdb.DuckDBPyConnection
     """
-    conn = get_duckdb_connection()
-    silver_bucket = st.secrets["gcs"]["silver_bucket"]
-    gold_bucket = st.secrets["gcs"]["gold_bucket"]
-
-    return conn, silver_bucket, gold_bucket
+    return get_duckdb_connection()

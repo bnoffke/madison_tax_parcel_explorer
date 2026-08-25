@@ -14,7 +14,7 @@ from utils.formatters import (
 st.set_page_config(layout="wide")
 
 # Access shared state (initializes if needed)
-conn, SILVER_BUCKET, GOLD_BUCKET = get_connection()
+conn = get_connection()
 
 # Reduce top padding
 st.markdown("""
@@ -70,7 +70,7 @@ def search_addresses(searchterm: str) -> list[tuple[str, str]]:
 
     try:
         # Get cached address data (shared across all sessions)
-        address_data = load_address_data(conn, SILVER_BUCKET)
+        address_data = load_address_data(conn)
         tokens = searchterm.lower().split()
 
         # Separate results by starts-with vs contains
@@ -100,14 +100,14 @@ def search_addresses(searchterm: str) -> list[tuple[str, str]]:
         return []
 
 @st.cache_data(ttl=600)  # Cache for 10 minutes
-def load_parcel_data(_conn, parcel_id: str, silver_bucket: str) -> dict:
+def load_parcel_data(_conn, parcel_id: str) -> dict:
     """Load complete parcel data including geometry for selected parcel."""
     if not parcel_id:
         return None
 
     query = f"""
     SELECT *
-    FROM read_parquet('{silver_bucket}/fact_parcels.parquet')
+    FROM silver.fact_parcels
     WHERE parcel_id = '{parcel_id.replace("'", "''")}'
     ORDER BY parcel_year DESC
     LIMIT 1
@@ -121,7 +121,7 @@ def load_parcel_data(_conn, parcel_id: str, silver_bucket: str) -> dict:
         return None
 
 @st.cache_data(ttl=600)  # Cache for 10 minutes
-def load_site_data(_conn, site_parcel_id: str, gold_bucket: str) -> dict:
+def load_site_data(_conn, site_parcel_id: str) -> dict:
     """Load site data for metrics display when parcel differs from site."""
     if not site_parcel_id:
         return None
@@ -133,11 +133,11 @@ def load_site_data(_conn, site_parcel_id: str, gold_bucket: str) -> dict:
         land_value_alignment_index,
         current_land_value,
         current_total_value
-    FROM read_parquet('{gold_bucket}/fact_sites.parquet')
+    FROM silver.fact_sites
     WHERE site_parcel_id = '{site_parcel_id.replace("'", "''")}'
     AND parcel_year = (
         SELECT MAX(parcel_year)
-        FROM read_parquet('{gold_bucket}/fact_sites.parquet')
+        FROM silver.fact_sites
     )
     """
 
@@ -158,14 +158,13 @@ def load_site_data(_conn, site_parcel_id: str, gold_bucket: str) -> dict:
 
 
 @st.cache_data(ttl=600)  # Cache for 10 minutes
-def load_tax_roll_history(_conn, parcel_id: str, silver_bucket: str) -> pd.DataFrame:
+def load_tax_roll_history(_conn, parcel_id: str) -> pd.DataFrame:
     """
     Load historical tax roll data for a specific parcel.
 
     Args:
         _conn: DuckDB connection (not hashed by Streamlit)
         parcel_id: The parcel ID to filter by
-        silver_bucket: GCS bucket path for silver layer data
 
     Returns:
         DataFrame with columns: tax_year, total_assessed_value, net_tax,
@@ -186,7 +185,7 @@ def load_tax_roll_history(_conn, parcel_id: str, silver_bucket: str) -> pd.DataF
         county_tax,
         school_tax,
         matc_tax
-    FROM read_parquet('{silver_bucket}/fact_tax_roll.parquet')
+    FROM silver.fact_tax_roll
     WHERE parcel_id = '{parcel_id.replace("'", "''")}'
     ORDER BY tax_year
     """
@@ -443,7 +442,7 @@ with status_col:
             msg_col, popover_col = st.columns([3, 1])
             with msg_col:
                 # Load parcel data to get the address
-                parcel_data_for_display = load_parcel_data(conn, parcel_id, SILVER_BUCKET)
+                parcel_data_for_display = load_parcel_data(conn, parcel_id)
                 if parcel_data_for_display:
                     address = format_address(parcel_data_for_display)
                     st.success(f"**{address}**  (Parcel: {parcel_id})")
@@ -451,7 +450,7 @@ with status_col:
                     st.success(f"Selected parcel: {parcel_id}")
             with popover_col:
                 with st.popover("Property Details"):
-                    if parcel_data := load_parcel_data(conn, parcel_id, SILVER_BUCKET):
+                    if parcel_data := load_parcel_data(conn, parcel_id):
                         char_col1, char_col2, char_col3 = st.columns(3)
 
                         with char_col1:
@@ -474,11 +473,11 @@ if selected_value and selected_value is not None:
 
     # Load parcel data
     with st.spinner("Loading parcel data..."):
-        parcel_data = load_parcel_data(conn, parcel_id, SILVER_BUCKET)
+        parcel_data = load_parcel_data(conn, parcel_id)
 
     if parcel_data:
         # Load tax history and supplement with latest fact_parcels year if ahead of tax_roll
-        tax_history_df = load_tax_roll_history(conn, parcel_id, SILVER_BUCKET)
+        tax_history_df = load_tax_roll_history(conn, parcel_id)
         if not tax_history_df.empty:
             parcel_year = parcel_data.get('parcel_year')
             max_tax_year = tax_history_df['tax_year'].max()
@@ -533,7 +532,7 @@ if selected_value and selected_value is not None:
             # Load site data if needed
             site_data = None
             if use_site_metrics:
-                site_data = load_site_data(conn, site_parcel_id, GOLD_BUCKET)
+                site_data = load_site_data(conn, site_parcel_id)
 
             # Build metrics with conditional site values
             if use_site_metrics and site_data:

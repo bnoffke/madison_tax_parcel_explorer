@@ -3,10 +3,15 @@ name = "madison-tax-parcel-explorer"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
-    "duckdb>=1.4.3",
+    "altair>=5.0.0",
+    "numpy>=2.0.0",
     "pandas>=2.3.3",
     "pydeck>=0.9.1",
     "rapidfuzz>=3.0.0",
+    "stmsn-query",
     "streamlit>=1.52.1",
     "streamlit-searchbox>=0.1.23",
 ]
+
+[tool.uv.sources]
+stmsn-query = { git = "https://github.com/bnoffke/stmsn-query" }

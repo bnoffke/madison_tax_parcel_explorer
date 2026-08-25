@@ -15,7 +15,7 @@ from utils.url_state import (
 from components.glossary_dialog import render_glossary_button
 
 # Access shared state (initializes if needed)
-conn, _, GOLD_BUCKET = get_connection()
+conn = get_connection()
 
 # Metric configuration
 METRICS = {
@@ -43,21 +43,21 @@ def available_metric_labels(overlay_type: str) -> list[str]:
 OVERLAY_TYPES = {
     "area_plans": {
         "label": "Area Plans",
-        "table": "fact_area_plans.parquet",
+        "table": "gold.fact_area_plans",
         "label_field": "area_plan_name",
         "display_name_field": "area_plan_name",
         "comparison_column_prefix": "Area Plan"
     },
     "alder_districts": {
         "label": "Alder Districts",
-        "table": "fact_alder_districts.parquet",
+        "table": "gold.fact_alder_districts",
         "label_field": "alder_district_name",
         "display_name_field": "alder_district_name",
         "comparison_column_prefix": "District"
     },
     "parcels": {
         "label": "Parcels",
-        "table": "fact_sites.parquet",
+        "table": "silver.fact_sites",
         "label_field": "parcel_address",
         "display_name_field": "address",
         "comparison_column_prefix": "Parcel"
@@ -114,12 +114,11 @@ def interpolate_magma_color(norm_val: float) -> list[int]:
 
 
 @st.cache_data(ttl=600)
-def load_map_data(_conn, gold_bucket: str, overlay_type: str) -> pd.DataFrame:
+def load_map_data(_conn, overlay_type: str) -> pd.DataFrame:
     """Load map data for the selected overlay type.
 
     Args:
         _conn: DuckDB connection
-        gold_bucket: GCS bucket path
         overlay_type: Key from OVERLAY_TYPES dict
 
     Returns:
@@ -202,10 +201,10 @@ def load_map_data(_conn, gold_bucket: str, overlay_type: str) -> pd.DataFrame:
         net_taxes_per_sqft_lot,
         land_value_per_sqft_lot,
         land_value_alignment_index
-    FROM read_parquet('{gold_bucket}/{table}')
+    FROM {table}
     WHERE {year_column} = (
         SELECT MAX({year_column})
-        FROM read_parquet('{gold_bucket}/{table}')
+        FROM {table}
     )
     AND geom_4326_geojson IS NOT NULL
     {additional_filters}
@@ -222,13 +221,13 @@ def load_map_data(_conn, gold_bucket: str, overlay_type: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=600)
-def load_parcel_filter_options(_conn, gold_bucket: str):
+def load_parcel_filter_options(_conn):
     """Load distinct combinations with count-based filtering for property_use/property_class."""
     # Get full combinations of all 4 dimensions for filterable values only
     query = f"""
     WITH filterable_props AS (
         SELECT DISTINCT property_class, property_use
-        FROM read_parquet('{gold_bucket}/fact_sites.parquet')
+        FROM silver.fact_sites
         WHERE property_class IS NOT NULL
           AND property_use IS NOT NULL
         GROUP BY ALL
@@ -239,7 +238,7 @@ def load_parcel_filter_options(_conn, gold_bucket: str):
         s.alder_district_name,
         s.property_class,
         s.property_use
-    FROM read_parquet('{gold_bucket}/fact_sites.parquet') s
+    FROM silver.fact_sites s
     INNER JOIN filterable_props fp
         ON s.property_class = fp.property_class
         AND s.property_use = fp.property_use
@@ -749,7 +748,7 @@ def hydrate_state_from_query_params():
 
     # Parcel filters only apply to the parcels overlay; ignored otherwise
     if overlay == "parcels":
-        df_combinations = load_parcel_filter_options(conn, GOLD_BUCKET)
+        df_combinations = load_parcel_filter_options(conn)
         area_plans, alder_districts, property_class, property_use = sanitize_parcel_filters(
             df_combinations,
             state["area_plans"],
@@ -812,7 +811,7 @@ with st.sidebar:
     # Parcel-specific filters (only shown when parcels overlay is selected)
     if overlay_type == "parcels":
         # Load filter options
-        df_filter_options = load_parcel_filter_options(conn, GOLD_BUCKET)
+        df_filter_options = load_parcel_filter_options(conn)
 
         # Get currently available options based on selections
         available_areas, available_districts, available_classes, available_uses = get_filtered_options(
@@ -893,7 +892,7 @@ with st.sidebar:
 
 
 # Load data (cached by overlay type only)
-df = load_map_data(conn, GOLD_BUCKET, overlay_type)
+df = load_map_data(conn, overlay_type)
 
 # Apply in-memory filtering for parcels
 if overlay_type == "parcels":
